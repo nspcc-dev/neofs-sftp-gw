@@ -1,0 +1,10 @@
+wallet:
+  path: "/path/to/wallet"
+  address:
+  passphrase: ""
+
+peers:
+  0:
+    address: s01.neofs.devenv:8080
+    weight: 1
+

@@ -1,0 +1,20 @@
+user:
+  enabled: true
+  path: "/home/${USER}/user-config.yml"
+
+wallet:
+  path: "/etc/neofs/sftp-gw/wallet.json"
+  address:
+  passphrase: ""
+peers:
+  0:
+    address: grpcs://s04.neofs.devenv:8082
+    weight: 1
+
+# This config section for develop purpose only.
+# It starts server as ssh server (not as openssh subsystem).
+dev:
+  enabled: false
+  sshkey: "~/.ssh/id_ed25519"
+  passphrase: "your_password_for_ssh_key"
+  address: "0.0.0.0:2022"
