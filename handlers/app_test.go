@@ -41,13 +41,13 @@ func TestSftpHandlers(t *testing.T) {
 	t.Run("test writer", func(t *testing.T) { testWriter(ctx, t, clientPool, CID) })
 }
 
-func testReader(ctx context.Context, t *testing.T, clientPool pool.Pool, CID *cid.ID) {
+func testReader(ctx context.Context, t *testing.T, clientPool pool.Pool, cnrID *cid.ID) {
 	content := "content for read test"
-	oid := putObject(ctx, t, clientPool, CID, content, nil)
+	oid := putObject(ctx, t, clientPool, cnrID, content, nil)
 
 	obj := &ObjectInfo{
 		Container: &ContainerInfo{
-			CID: CID,
+			CID: cnrID,
 		},
 		OID:         oid,
 		PayloadSize: int64(len(content)),
@@ -75,12 +75,12 @@ func testReader(ctx context.Context, t *testing.T, clientPool pool.Pool, CID *ci
 	require.Equal(t, content, buff.String())
 }
 
-func testWriter(ctx context.Context, t *testing.T, clientPool pool.Pool, CID *cid.ID) {
+func testWriter(ctx context.Context, t *testing.T, clientPool pool.Pool, cnrID *cid.ID) {
 	content := "content for write test"
 
 	obj := &ObjectInfo{
 		Container: &ContainerInfo{
-			CID: CID,
+			CID: cnrID,
 		},
 		FileName: "write-test-object",
 	}
@@ -101,7 +101,7 @@ func testWriter(ctx context.Context, t *testing.T, clientPool pool.Pool, CID *ci
 	err = writer.Close()
 	require.NoError(t, err)
 
-	payload, err := getObjectByName(ctx, clientPool, CID, obj.Name())
+	payload, err := getObjectByName(ctx, clientPool, cnrID, obj.Name())
 	require.NoError(t, err)
 
 	require.Equal(t, content, string(payload))
@@ -162,9 +162,9 @@ func createContainer(ctx context.Context, t *testing.T, clientPool pool.Pool) *c
 	return CID
 }
 
-func putObject(ctx context.Context, t *testing.T, clientPool pool.Pool, CID *cid.ID, content string, attributes map[string]string) *object.ID {
+func putObject(ctx context.Context, t *testing.T, clientPool pool.Pool, cnrID *cid.ID, content string, attributes map[string]string) *object.ID {
 	rawObject := object.NewRaw()
-	rawObject.SetContainerID(CID)
+	rawObject.SetContainerID(cnrID)
 	rawObject.SetOwnerID(clientPool.OwnerID())
 
 	var attrs []*object.Attribute
@@ -183,12 +183,12 @@ func putObject(ctx context.Context, t *testing.T, clientPool pool.Pool, CID *cid
 	return oid
 }
 
-func getObjectByName(ctx context.Context, clientPool pool.Pool, CID *cid.ID, name string) ([]byte, error) {
+func getObjectByName(ctx context.Context, clientPool pool.Pool, cnrID *cid.ID, name string) ([]byte, error) {
 	filter := object.NewSearchFilters()
 	filter.AddRootFilter()
 	filter.AddFilter(object.AttributeFileName, name, object.MatchStringEqual)
 
-	params := new(client.SearchObjectParams).WithContainerID(CID).WithSearchFilters(filter)
+	params := new(client.SearchObjectParams).WithContainerID(cnrID).WithSearchFilters(filter)
 
 	ids, err := clientPool.SearchObject(ctx, params)
 	if err != nil {
@@ -198,7 +198,7 @@ func getObjectByName(ctx context.Context, clientPool pool.Pool, CID *cid.ID, nam
 		return nil, errors.New("found not exactly one object")
 	}
 
-	return getObject(ctx, clientPool, newAddress(CID, ids[0]))
+	return getObject(ctx, clientPool, newAddress(cnrID, ids[0]))
 }
 
 func getObject(ctx context.Context, clientPool pool.Pool, address *object.Address) ([]byte, error) {

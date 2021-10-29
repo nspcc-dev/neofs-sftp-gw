@@ -93,13 +93,13 @@ func (f ListerAt) ListAt(ls []os.FileInfo, offset int64) (int, error) {
 	return n, nil
 }
 
-func (a *App) listObjects(ctx context.Context, CID *cid.ID) ([]os.FileInfo, error) {
+func (a *App) listObjects(ctx context.Context, cnrID *cid.ID) ([]os.FileInfo, error) {
 	var result []os.FileInfo
 
 	opts := object.NewSearchFilters()
 	opts.AddRootFilter()
 
-	objIds, err := a.pool.SearchObject(ctx, new(client.SearchObjectParams).WithSearchFilters(opts).WithContainerID(CID))
+	objIds, err := a.pool.SearchObject(ctx, new(client.SearchObjectParams).WithSearchFilters(opts).WithContainerID(cnrID))
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +107,7 @@ func (a *App) listObjects(ctx context.Context, CID *cid.ID) ([]os.FileInfo, erro
 	existedFiles := make(map[string]struct{}, len(objIds))
 
 	for _, oid := range objIds {
-		obj, err := a.getObjectFile(ctx, newAddress(CID, oid))
+		obj, err := a.getObjectFile(ctx, newAddress(cnrID, oid))
 		if err != nil {
 			return nil, err
 		}
@@ -155,12 +155,12 @@ func (a *App) getObjectFile(ctx context.Context, address *object.Address) (*Obje
 	return file, nil
 }
 
-func (a *App) getObjectFileByName(ctx context.Context, CID *cid.ID, name string) (*ObjectInfo, error) {
+func (a *App) getObjectFileByName(ctx context.Context, cnrID *cid.ID, name string) (*ObjectInfo, error) {
 	filters := object.NewSearchFilters()
 	filters.AddRootFilter()
 	filters.AddFilter(object.AttributeFileName, name, object.MatchStringEqual)
 
-	params := new(client.SearchObjectParams).WithSearchFilters(filters).WithContainerID(CID)
+	params := new(client.SearchObjectParams).WithSearchFilters(filters).WithContainerID(cnrID)
 	objIds, err := a.pool.SearchObject(ctx, params)
 	if err != nil {
 		return nil, err
@@ -170,18 +170,18 @@ func (a *App) getObjectFileByName(ctx context.Context, CID *cid.ID, name string)
 		return nil, fmt.Errorf("not found")
 	}
 
-	return a.getObjectFile(ctx, newAddress(CID, objIds[0]))
+	return a.getObjectFile(ctx, newAddress(cnrID, objIds[0]))
 }
 
-func (a *App) getContainer(ctx context.Context, CID *cid.ID) (*ContainerInfo, error) {
-	ctnr, err := a.pool.GetContainer(ctx, CID)
+func (a *App) getContainer(ctx context.Context, cnrID *cid.ID) (*ContainerInfo, error) {
+	ctnr, err := a.pool.GetContainer(ctx, cnrID)
 	if err != nil {
 		return nil, err
 	}
 
 	file := &ContainerInfo{
-		FileName: CID.String(),
-		CID:      CID,
+		FileName: cnrID.String(),
+		CID:      cnrID,
 		Created:  time.Now(),
 	}
 
@@ -334,8 +334,8 @@ func (a *App) deleteObject(ctx context.Context, address *object.Address) error {
 	return a.pool.DeleteObject(ctx, params)
 }
 
-func (a *App) deleteContainer(ctx context.Context, CID *cid.ID) error {
-	return a.pool.DeleteContainer(ctx, CID)
+func (a *App) deleteContainer(ctx context.Context, cnrID *cid.ID) error {
+	return a.pool.DeleteContainer(ctx, cnrID)
 }
 
 // Filecmd called for Methods: Setstat, Rename, Rmdir, Mkdir, Link, Symlink, Remove.
@@ -368,7 +368,8 @@ func (a *App) Filewrite(r *sftp.Request) (io.WriterAt, error) {
 
 	obj := &ObjectInfo{
 		FileName:  strings.TrimPrefix(trimmed, split[0]+delimiter),
-		Container: ctnr}
+		Container: ctnr,
+	}
 
 	return newWriter(obj, a.pool), nil
 }
