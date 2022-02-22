@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/nspcc-dev/neo-go/pkg/crypto/keys"
-	"github.com/nspcc-dev/neofs-api-go/pkg/client"
-	"github.com/nspcc-dev/neofs-api-go/pkg/container"
-	cid "github.com/nspcc-dev/neofs-api-go/pkg/container/id"
-	"github.com/nspcc-dev/neofs-api-go/pkg/object"
+	"github.com/nspcc-dev/neofs-sdk-go/container"
+	cid "github.com/nspcc-dev/neofs-sdk-go/container/id"
+	"github.com/nspcc-dev/neofs-sdk-go/object"
+	oid "github.com/nspcc-dev/neofs-sdk-go/object/id"
 	"github.com/nspcc-dev/neofs-sdk-go/policy"
 	"github.com/nspcc-dev/neofs-sdk-go/pool"
 	"github.com/stretchr/testify/require"
@@ -43,17 +43,17 @@ func TestSftpHandlers(t *testing.T) {
 
 func testReader(ctx context.Context, t *testing.T, clientPool pool.Pool, cnrID *cid.ID) {
 	content := "content for read test"
-	oid := putObject(ctx, t, clientPool, cnrID, content, nil)
+	id := putObject(ctx, t, clientPool, cnrID, content, nil)
 
 	obj := &ObjectInfo{
 		Container: &ContainerInfo{
 			CID: cnrID,
 		},
-		OID:         oid,
+		OID:         id,
 		PayloadSize: int64(len(content)),
 	}
 
-	reader := newReader(obj, clientPool)
+	reader := newReader(ctx, obj, clientPool)
 
 	_, err := reader.ReadAt(nil, -1)
 	require.Error(t, err)
@@ -85,7 +85,7 @@ func testWriter(ctx context.Context, t *testing.T, clientPool pool.Pool, cnrID *
 		FileName: "write-test-object",
 	}
 
-	writer := newWriter(obj, clientPool)
+	writer := newWriter(ctx, obj, clientPool)
 
 	_, err := writer.WriteAt(nil, -1)
 	require.Error(t, err)
@@ -126,7 +126,7 @@ func createDockerContainer(ctx context.Context, t *testing.T, image string) test
 
 func getPool(ctx context.Context, t *testing.T, key *keys.PrivateKey) pool.Pool {
 	pb := new(pool.Builder)
-	pb.AddNode("localhost:8080", 1)
+	pb.AddNode("localhost:8080", 1, 1)
 
 	opts := &pool.BuilderOptions{
 		Key:                   &key.PrivateKey,
@@ -162,7 +162,7 @@ func createContainer(ctx context.Context, t *testing.T, clientPool pool.Pool) *c
 	return CID
 }
 
-func putObject(ctx context.Context, t *testing.T, clientPool pool.Pool, cnrID *cid.ID, content string, attributes map[string]string) *object.ID {
+func putObject(ctx context.Context, t *testing.T, clientPool pool.Pool, cnrID *cid.ID, content string, attributes map[string]string) *oid.ID {
 	rawObject := object.NewRaw()
 	rawObject.SetContainerID(cnrID)
 	rawObject.SetOwnerID(clientPool.OwnerID())
@@ -175,12 +175,12 @@ func putObject(ctx context.Context, t *testing.T, clientPool pool.Pool, cnrID *c
 		attrs = append(attrs, attr)
 	}
 	rawObject.SetAttributes(attrs...)
+	rawObject.SetPayload([]byte(content))
 
-	ops := new(client.PutObjectParams).WithObject(rawObject.Object()).WithPayloadReader(bytes.NewBufferString(content))
-	oid, err := clientPool.PutObject(ctx, ops)
+	id, err := clientPool.PutObject(ctx, *rawObject.Object(), nil)
 	require.NoError(t, err)
 
-	return oid
+	return id
 }
 
 func getObjectByName(ctx context.Context, clientPool pool.Pool, cnrID *cid.ID, name string) ([]byte, error) {
@@ -188,9 +188,7 @@ func getObjectByName(ctx context.Context, clientPool pool.Pool, cnrID *cid.ID, n
 	filter.AddRootFilter()
 	filter.AddFilter(object.AttributeFileName, name, object.MatchStringEqual)
 
-	params := new(client.SearchObjectParams).WithContainerID(cnrID).WithSearchFilters(filter)
-
-	ids, err := clientPool.SearchObject(ctx, params)
+	ids, err := searchObjects(ctx, clientPool, cnrID, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -198,12 +196,10 @@ func getObjectByName(ctx context.Context, clientPool pool.Pool, cnrID *cid.ID, n
 		return nil, errors.New("found not exactly one object")
 	}
 
-	return getObject(ctx, clientPool, newAddress(cnrID, ids[0]))
-}
+	res, err := clientPool.GetObject(ctx, *newAddress(cnrID, &ids[0]))
+	if err != nil {
+		return nil, err
+	}
 
-func getObject(ctx context.Context, clientPool pool.Pool, address *object.Address) ([]byte, error) {
-	payload := bytes.NewBuffer(nil)
-	ops := new(client.GetObjectParams).WithAddress(address).WithPayloadWriter(payload)
-	_, err := clientPool.GetObject(ctx, ops)
-	return payload.Bytes(), err
+	return io.ReadAll(res.Payload)
 }

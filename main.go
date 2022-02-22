@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"math"
 	"net"
 	"os"
 	"os/signal"
@@ -75,7 +74,6 @@ func newHandler(ctx context.Context, l *zap.Logger, v *viper.Viper, sftpConfig *
 		NodeConnectionTimeout:   conTimeout,
 		NodeRequestTimeout:      reqTimeout,
 		ClientRebalanceInterval: reBalance,
-		SessionExpirationEpoch:  math.MaxUint64,
 	}
 	conns, err = poolPeers.Build(ctx, opts)
 	if err != nil {
