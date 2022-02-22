@@ -11,10 +11,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nspcc-dev/neofs-api-go/pkg/client"
-	"github.com/nspcc-dev/neofs-api-go/pkg/container"
-	cid "github.com/nspcc-dev/neofs-api-go/pkg/container/id"
-	"github.com/nspcc-dev/neofs-api-go/pkg/object"
+	"github.com/nspcc-dev/neofs-sdk-go/container"
+	cid "github.com/nspcc-dev/neofs-sdk-go/container/id"
+	"github.com/nspcc-dev/neofs-sdk-go/object"
+	"github.com/nspcc-dev/neofs-sdk-go/object/address"
+	oid "github.com/nspcc-dev/neofs-sdk-go/object/id"
 	"github.com/nspcc-dev/neofs-sdk-go/pool"
 	"github.com/pkg/sftp"
 	"go.uber.org/zap"
@@ -45,11 +46,13 @@ type (
 	ListerAt []os.FileInfo
 
 	objReader struct {
+		ctx  context.Context
 		file *ObjectInfo
 		pool pool.Pool
 	}
 
 	objWriter struct {
+		ctx    context.Context
 		file   *ObjectInfo
 		pool   pool.Pool
 		buffer *bytes.Buffer
@@ -65,15 +68,17 @@ func NewApp(conns pool.Pool, l *zap.Logger, sftpConfig *SftpServerConfig) *App {
 	}
 }
 
-func newReader(obj *ObjectInfo, conn pool.Pool) *objReader {
+func newReader(ctx context.Context, obj *ObjectInfo, conn pool.Pool) *objReader {
 	return &objReader{
+		ctx:  ctx,
 		file: obj,
 		pool: conn,
 	}
 }
 
-func newWriter(obj *ObjectInfo, conn pool.Pool) *objWriter {
+func newWriter(ctx context.Context, obj *ObjectInfo, conn pool.Pool) *objWriter {
 	return &objWriter{
+		ctx:    ctx,
 		file:   obj,
 		pool:   conn,
 		buffer: bytes.NewBuffer(nil),
@@ -96,18 +101,18 @@ func (f ListerAt) ListAt(ls []os.FileInfo, offset int64) (int, error) {
 func (a *App) listObjects(ctx context.Context, cnrID *cid.ID) ([]os.FileInfo, error) {
 	var result []os.FileInfo
 
-	opts := object.NewSearchFilters()
-	opts.AddRootFilter()
+	filters := object.NewSearchFilters()
+	filters.AddRootFilter()
 
-	objIds, err := a.pool.SearchObject(ctx, new(client.SearchObjectParams).WithSearchFilters(opts).WithContainerID(cnrID))
+	objIds, err := searchObjects(ctx, a.pool, cnrID, filters)
 	if err != nil {
 		return nil, err
 	}
 
 	existedFiles := make(map[string]struct{}, len(objIds))
 
-	for _, oid := range objIds {
-		obj, err := a.getObjectFile(ctx, newAddress(cnrID, oid))
+	for _, id := range objIds {
+		obj, err := a.getObjectFile(ctx, newAddress(cnrID, &id))
 		if err != nil {
 			return nil, err
 		}
@@ -120,9 +125,8 @@ func (a *App) listObjects(ctx context.Context, cnrID *cid.ID) ([]os.FileInfo, er
 	return result, nil
 }
 
-func (a *App) getObjectFile(ctx context.Context, address *object.Address) (*ObjectInfo, error) {
-	ops := new(client.ObjectHeaderParams).WithAddress(address).WithAllFields()
-	objMeta, err := a.pool.GetObjectHeader(ctx, ops)
+func (a *App) getObjectFile(ctx context.Context, address *address.Address) (*ObjectInfo, error) {
+	objMeta, err := a.pool.HeadObject(ctx, *address)
 	if err != nil {
 		return nil, err
 	}
@@ -160,8 +164,7 @@ func (a *App) getObjectFileByName(ctx context.Context, cnrID *cid.ID, name strin
 	filters.AddRootFilter()
 	filters.AddFilter(object.AttributeFileName, name, object.MatchStringEqual)
 
-	params := new(client.SearchObjectParams).WithSearchFilters(filters).WithContainerID(cnrID)
-	objIds, err := a.pool.SearchObject(ctx, params)
+	objIds, err := searchObjects(ctx, a.pool, cnrID, filters)
 	if err != nil {
 		return nil, err
 	}
@@ -170,7 +173,7 @@ func (a *App) getObjectFileByName(ctx context.Context, cnrID *cid.ID, name strin
 		return nil, fmt.Errorf("not found")
 	}
 
-	return a.getObjectFile(ctx, newAddress(cnrID, objIds[0]))
+	return a.getObjectFile(ctx, newAddress(cnrID, &objIds[0]))
 }
 
 func (a *App) getContainer(ctx context.Context, cnrID *cid.ID) (*ContainerInfo, error) {
@@ -295,12 +298,12 @@ func (a *App) getFileStat(ctx context.Context, path string) (os.FileInfo, error)
 	}
 
 	if len(split) == 2 && len(split[1]) > 0 {
-		oid := object.NewID()
-		if err := oid.Parse(split[1]); err != nil {
+		id := oid.NewID()
+		if err := id.Parse(split[1]); err != nil {
 			return nil, err
 		}
 
-		obj, err := a.getObjectFile(ctx, newAddress(ctnr.CID, oid))
+		obj, err := a.getObjectFile(ctx, newAddress(ctnr.CID, id))
 		if err != nil {
 			return nil, err
 		}
@@ -323,15 +326,10 @@ func (a *App) deleteNeofsFile(ctx context.Context, path string) error {
 		if err != nil {
 			return err
 		}
-		return a.deleteObject(ctx, newAddress(cntr.CID, obj.OID))
+		return a.pool.DeleteObject(ctx, *newAddress(cntr.CID, obj.OID))
 	}
 
 	return a.deleteContainer(ctx, cntr.CID)
-}
-
-func (a *App) deleteObject(ctx context.Context, address *object.Address) error {
-	params := new(client.DeleteObjectParams).WithAddress(address)
-	return a.pool.DeleteObject(ctx, params)
 }
 
 func (a *App) deleteContainer(ctx context.Context, cnrID *cid.ID) error {
@@ -346,7 +344,7 @@ func (a *App) Filecmd(r *sftp.Request) error {
 	switch r.Method {
 	case "Mkdir":
 	case "Remove", "Rmdir":
-		err := a.deleteNeofsFile(context.TODO(), r.Filepath)
+		err := a.deleteNeofsFile(r.Context(), r.Filepath)
 		return err
 	}
 
@@ -361,7 +359,7 @@ func (a *App) Filewrite(r *sftp.Request) (io.WriterAt, error) {
 	}
 	trimmed := strings.TrimPrefix(r.Filepath, delimiter)
 	split := strings.Split(trimmed, delimiter)
-	ctnr, err := a.getContainerByName(context.TODO(), split[0])
+	ctnr, err := a.getContainerByName(r.Context(), split[0])
 	if err != nil {
 		return nil, err
 	}
@@ -371,13 +369,13 @@ func (a *App) Filewrite(r *sftp.Request) (io.WriterAt, error) {
 		Container: ctnr,
 	}
 
-	return newWriter(obj, a.pool), nil
+	return newWriter(r.Context(), obj, a.pool), nil
 }
 
 // Fileread prepares io.ReaderAt to download file.
 // Called for Methods: Get.
 func (a *App) Fileread(r *sftp.Request) (io.ReaderAt, error) {
-	file, err := a.getFileStat(context.TODO(), r.Filepath)
+	file, err := a.getFileStat(r.Context(), r.Filepath)
 	if err != nil {
 		return nil, err
 	}
@@ -387,7 +385,7 @@ func (a *App) Fileread(r *sftp.Request) (io.ReaderAt, error) {
 		return nil, fmt.Errorf("couldn't get file stat")
 	}
 
-	return newReader(obj, a.pool), nil
+	return newReader(r.Context(), obj, a.pool), nil
 }
 
 // Filelist returns files information.
@@ -395,13 +393,13 @@ func (a *App) Fileread(r *sftp.Request) (io.ReaderAt, error) {
 func (a *App) Filelist(r *sftp.Request) (sftp.ListerAt, error) {
 	switch r.Method {
 	case "List":
-		files, err := a.listPath(context.TODO(), r.Filepath)
+		files, err := a.listPath(r.Context(), r.Filepath)
 		if err != nil {
 			return nil, err
 		}
 		return ListerAt(files), nil
 	case "Stat":
-		stat, err := a.getFileStat(context.TODO(), r.Filepath)
+		stat, err := a.getFileStat(r.Context(), r.Filepath)
 		if err != nil {
 			return nil, err
 		}
@@ -412,11 +410,11 @@ func (a *App) Filelist(r *sftp.Request) (sftp.ListerAt, error) {
 	return nil, errors.New("unsupported")
 }
 
-func newAddress(cid *cid.ID, oid *object.ID) *object.Address {
-	address := object.NewAddress()
-	address.SetContainerID(cid)
-	address.SetObjectID(oid)
-	return address
+func newAddress(cid *cid.ID, oid *oid.ID) *address.Address {
+	addr := address.NewAddress()
+	addr.SetContainerID(cid)
+	addr.SetObjectID(oid)
+	return addr
 }
 
 func (w *objWriter) Close() error {
@@ -436,8 +434,7 @@ func (w *objWriter) Close() error {
 	raw.SetContainerID(w.file.Container.CID)
 	raw.SetAttributes(attributes...)
 
-	ops := new(client.PutObjectParams).WithObject(raw.Object()).WithPayloadReader(w.buffer)
-	_, err := w.pool.PutObject(context.TODO(), ops)
+	_, err := w.pool.PutObject(w.ctx, *raw.Object(), w.buffer)
 	return err
 }
 
@@ -466,15 +463,46 @@ func (r *objReader) ReadAt(b []byte, off int64) (n int, err error) {
 	rang.SetLength(length)
 	rang.SetOffset(uint64(off))
 
-	ops := new(client.RangeDataParams).WithAddress(newAddress(r.file.Container.CID, r.file.OID)).WithRange(rang)
-	data, err := r.pool.ObjectPayloadRangeData(context.TODO(), ops)
+	addr := newAddress(r.file.Container.CID, r.file.OID)
+	res, err := r.pool.ObjectRange(r.ctx, *addr, uint64(off), length)
 	if err != nil {
 		return 0, err
 	}
 
-	n = copy(b, data)
+	n, err = io.ReadFull(res, b)
 	if n < len(b) {
 		err = io.EOF
 	}
 	return
+}
+
+func searchObjects(ctx context.Context, sdkPool pool.Pool, cnrID *cid.ID, filters object.SearchFilters) ([]oid.ID, error) {
+	res, err := sdkPool.SearchObjects(ctx, *cnrID, filters)
+	if err != nil {
+		return nil, fmt.Errorf("init searching using client: %w", err)
+	}
+
+	defer res.Close()
+
+	var num, read int
+	buf := make([]oid.ID, 10)
+
+	for {
+		num, err = res.Read(buf[read:])
+		if num > 0 {
+			read += num
+			buf = append(buf, oid.ID{})
+			buf = buf[:cap(buf)]
+		}
+
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+
+			return nil, fmt.Errorf("couldn't read found objects: %w", err)
+		}
+	}
+
+	return buf[:read], nil
 }

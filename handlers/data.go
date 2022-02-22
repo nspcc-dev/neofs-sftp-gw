@@ -4,8 +4,8 @@ import (
 	"io/fs"
 	"time"
 
-	cid "github.com/nspcc-dev/neofs-api-go/pkg/container/id"
-	"github.com/nspcc-dev/neofs-api-go/pkg/object"
+	cid "github.com/nspcc-dev/neofs-sdk-go/container/id"
+	oid "github.com/nspcc-dev/neofs-sdk-go/object/id"
 )
 
 type (
@@ -21,7 +21,7 @@ type (
 	// Implements fs.FileInfo.
 	ObjectInfo struct {
 		Container   *ContainerInfo
-		OID         *object.ID
+		OID         *oid.ID
 		FilePath    string
 		FileName    string
 		PayloadSize int64
