@@ -104,25 +104,34 @@ func (a *App) listObjects(ctx context.Context, cnrID *cid.ID) ([]os.FileInfo, er
 	filters := object.NewSearchFilters()
 	filters.AddRootFilter()
 
-	objIds, err := searchObjects(ctx, a.pool, cnrID, filters)
+	res, err := a.pool.SearchObjects(ctx, *cnrID, filters)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("init searching: %w", err)
 	}
+	defer res.Close()
 
-	existedFiles := make(map[string]struct{}, len(objIds))
+	existedFiles := make(map[string]struct{})
 
-	for _, id := range objIds {
-		obj, err := a.getObjectFile(ctx, newAddress(cnrID, &id))
+	var inErr error
+	var obj *ObjectInfo
+
+	err = res.Iterate(func(id oid.ID) bool {
+		obj, inErr = a.getObjectFile(ctx, newAddress(cnrID, &id))
 		if err != nil {
-			return nil, err
+			return true
 		}
 		if _, ok := existedFiles[obj.Name()]; ok {
-			continue
+			return false
 		}
 		existedFiles[obj.Name()] = struct{}{}
 		result = append(result, obj)
+		return false
+	})
+	if err == nil {
+		err = inErr
 	}
-	return result, nil
+
+	return result, err
 }
 
 func (a *App) getObjectFile(ctx context.Context, address *address.Address) (*ObjectInfo, error) {
@@ -164,16 +173,26 @@ func (a *App) getObjectFileByName(ctx context.Context, cnrID *cid.ID, name strin
 	filters.AddRootFilter()
 	filters.AddFilter(object.AttributeFileName, name, object.MatchStringEqual)
 
-	objIds, err := searchObjects(ctx, a.pool, cnrID, filters)
+	res, err := a.pool.SearchObjects(ctx, *cnrID, filters)
+	if err != nil {
+		return nil, fmt.Errorf("init searching: %w", err)
+	}
+	defer res.Close()
+
+	var objId *oid.ID
+	err = res.Iterate(func(id oid.ID) bool {
+		objId = &id
+		return true
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	if len(objIds) == 0 {
+	if objId == nil {
 		return nil, fmt.Errorf("not found")
 	}
 
-	return a.getObjectFile(ctx, newAddress(cnrID, &objIds[0]))
+	return a.getObjectFile(ctx, newAddress(cnrID, objId))
 }
 
 func (a *App) getContainer(ctx context.Context, cnrID *cid.ID) (*ContainerInfo, error) {
@@ -429,17 +448,18 @@ func (w *objWriter) Close() error {
 
 	attributes = append(attributes, filename, createdAt)
 
-	raw := object.NewRaw()
-	raw.SetOwnerID(w.pool.OwnerID())
-	raw.SetContainerID(w.file.Container.CID)
-	raw.SetAttributes(attributes...)
+	obj := object.New()
+	obj.SetOwnerID(w.pool.OwnerID())
+	obj.SetContainerID(w.file.Container.CID)
+	obj.SetAttributes(attributes...)
 
-	_, err := w.pool.PutObject(w.ctx, *raw.Object(), w.buffer)
+	_, err := w.pool.PutObject(w.ctx, *obj, w.buffer)
 	return err
 }
 
 func (w *objWriter) WriteAt(p []byte, off int64) (n int, err error) {
 	if off != int64(w.buffer.Len()) {
+		// todo consider support it or add regular put object streaming
 		return 0, fmt.Errorf("unsupported")
 	}
 	return w.buffer.Write(p)
@@ -459,9 +479,6 @@ func (r *objReader) ReadAt(b []byte, off int64) (n int, err error) {
 	if length > availableLength {
 		length = availableLength
 	}
-	rang := object.NewRange()
-	rang.SetLength(length)
-	rang.SetOffset(uint64(off))
 
 	addr := newAddress(r.file.Container.CID, r.file.OID)
 	res, err := r.pool.ObjectRange(r.ctx, *addr, uint64(off), length)
@@ -474,35 +491,4 @@ func (r *objReader) ReadAt(b []byte, off int64) (n int, err error) {
 		err = io.EOF
 	}
 	return
-}
-
-func searchObjects(ctx context.Context, sdkPool pool.Pool, cnrID *cid.ID, filters object.SearchFilters) ([]oid.ID, error) {
-	res, err := sdkPool.SearchObjects(ctx, *cnrID, filters)
-	if err != nil {
-		return nil, fmt.Errorf("init searching using client: %w", err)
-	}
-
-	defer res.Close()
-
-	var num, read int
-	buf := make([]oid.ID, 10)
-
-	for {
-		num, err = res.Read(buf[read:])
-		if num > 0 {
-			read += num
-			buf = append(buf, oid.ID{})
-			buf = buf[:cap(buf)]
-		}
-
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-
-			return nil, fmt.Errorf("couldn't read found objects: %w", err)
-		}
-	}
-
-	return buf[:read], nil
 }
