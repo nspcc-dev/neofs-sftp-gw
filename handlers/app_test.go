@@ -22,23 +22,28 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-const testImage = "nspccdev/neofs-aio-testcontainer:0.24.0"
-
 func TestSftpHandlers(t *testing.T) {
+	rootCtx := context.Background()
+	aioImage := "nspccdev/neofs-aio-testcontainer:"
+	versions := []string{"0.24.0", "0.25.1", "0.26.1", "0.27.0", "latest"}
 	key, err := keys.NewPrivateKeyFromHex("1dd37fba80fec4e6a6f13fd708d8dcb3b29def768017052f6c930fa1c5d90bbb")
 	require.NoError(t, err)
 
-	ctx := context.Background()
-	ctnr := createDockerContainer(ctx, t, testImage)
-	defer func() {
-		_ = ctnr.Terminate(ctx)
-	}()
+	for _, version := range versions {
+		ctx, cancel := context.WithCancel(rootCtx)
 
-	clientPool := getPool(ctx, t, key)
-	CID := createContainer(ctx, t, clientPool)
+		aioContainer := createDockerContainer(ctx, t, aioImage+version)
 
-	t.Run("test reader", func(t *testing.T) { testReader(ctx, t, clientPool, CID) })
-	t.Run("test writer", func(t *testing.T) { testWriter(ctx, t, clientPool, CID) })
+		clientPool := getPool(ctx, t, key)
+		CID := createContainer(ctx, t, clientPool)
+
+		t.Run("test reader", func(t *testing.T) { testReader(ctx, t, clientPool, CID) })
+		t.Run("test writer", func(t *testing.T) { testWriter(ctx, t, clientPool, CID) })
+
+		err = aioContainer.Terminate(ctx)
+		require.NoError(t, err)
+		cancel()
+	}
 }
 
 func testReader(ctx context.Context, t *testing.T, clientPool pool.Pool, cnrID *cid.ID) {
@@ -163,9 +168,9 @@ func createContainer(ctx context.Context, t *testing.T, clientPool pool.Pool) *c
 }
 
 func putObject(ctx context.Context, t *testing.T, clientPool pool.Pool, cnrID *cid.ID, content string, attributes map[string]string) *oid.ID {
-	rawObject := object.NewRaw()
-	rawObject.SetContainerID(cnrID)
-	rawObject.SetOwnerID(clientPool.OwnerID())
+	obj := object.New()
+	obj.SetContainerID(cnrID)
+	obj.SetOwnerID(clientPool.OwnerID())
 
 	var attrs []*object.Attribute
 	for key, val := range attributes {
@@ -174,10 +179,10 @@ func putObject(ctx context.Context, t *testing.T, clientPool pool.Pool, cnrID *c
 		attr.SetValue(val)
 		attrs = append(attrs, attr)
 	}
-	rawObject.SetAttributes(attrs...)
-	rawObject.SetPayload([]byte(content))
+	obj.SetAttributes(attrs...)
+	obj.SetPayload([]byte(content))
 
-	id, err := clientPool.PutObject(ctx, *rawObject.Object(), nil)
+	id, err := clientPool.PutObject(ctx, *obj, nil)
 	require.NoError(t, err)
 
 	return id
@@ -188,18 +193,30 @@ func getObjectByName(ctx context.Context, clientPool pool.Pool, cnrID *cid.ID, n
 	filter.AddRootFilter()
 	filter.AddFilter(object.AttributeFileName, name, object.MatchStringEqual)
 
-	ids, err := searchObjects(ctx, clientPool, cnrID, filter)
+	res, err := clientPool.SearchObjects(ctx, *cnrID, filter)
+	if err != nil {
+		return nil, fmt.Errorf("init searching using client: %w", err)
+	}
+	defer res.Close()
+
+	ids := make([]oid.ID, 0, 2)
+
+	err = res.Iterate(func(id oid.ID) bool {
+		ids = append(ids, id)
+		return len(ids) > 1
+	})
 	if err != nil {
 		return nil, err
 	}
+
 	if len(ids) != 1 {
 		return nil, errors.New("found not exactly one object")
 	}
 
-	res, err := clientPool.GetObject(ctx, *newAddress(cnrID, &ids[0]))
+	resObj, err := clientPool.GetObject(ctx, *newAddress(cnrID, &ids[0]))
 	if err != nil {
 		return nil, err
 	}
 
-	return io.ReadAll(res.Payload)
+	return io.ReadAll(resObj.Payload)
 }
