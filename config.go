@@ -61,8 +61,8 @@ const (
 	configType = "yaml"
 )
 
-func fetchPeers(l *zap.Logger, v *viper.Viper) *pool.Builder {
-	pb := new(pool.Builder)
+func fetchPeers(l *zap.Logger, v *viper.Viper) []pool.NodeParam {
+	var peers []pool.NodeParam
 
 	for i := 0; ; i++ {
 		key := cfgPeers + "." + strconv.Itoa(i) + "."
@@ -86,14 +86,14 @@ func fetchPeers(l *zap.Logger, v *viper.Viper) *pool.Builder {
 				zap.String("address", address))
 			priority = 1
 		}
-		pb.AddNode(address, priority, weight)
+		peers = append(peers, pool.NewNodeParam(priority, address, weight))
 
 		l.Info("added connection peer",
 			zap.String("address", address),
 			zap.Float64("weight", weight))
 	}
 
-	return pb
+	return peers
 }
 
 func newSettings() (*viper.Viper, *handlers.SftpServerConfig, devConfig) {

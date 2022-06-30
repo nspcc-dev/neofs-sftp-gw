@@ -12,7 +12,7 @@ type (
 	// ContainerInfo contains neofs container data.
 	// Implements fs.FileInfo.
 	ContainerInfo struct {
-		CID      *cid.ID
+		CID      cid.ID
 		FileName string
 		Created  time.Time
 	}
@@ -21,7 +21,7 @@ type (
 	// Implements fs.FileInfo.
 	ObjectInfo struct {
 		Container   *ContainerInfo
-		OID         *oid.ID
+		ObjectID    oid.ID
 		FilePath    string
 		FileName    string
 		PayloadSize int64
