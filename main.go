@@ -11,8 +11,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/nspcc-dev/neo-go/pkg/crypto/keys"
 	"github.com/nspcc-dev/neofs-sdk-go/pool"
+	"github.com/nspcc-dev/neofs-sdk-go/user"
 	"github.com/nspcc-dev/neofs-sftp-gw/handlers"
 	"github.com/nspcc-dev/neofs-sftp-gw/internal/wallet"
 	"github.com/pkg/sftp"
@@ -36,51 +36,59 @@ func main() {
 
 func newHandler(ctx context.Context, l *zap.Logger, v *viper.Viper, sftpConfig *handlers.SftpServerConfig) *handlers.App {
 	var (
-		conns pool.Pool
-		key   *keys.PrivateKey
-		err   error
-
 		reBalance  = defaultRebalanceTimer
 		conTimeout = defaultConnectTimeout
 		reqTimeout = defaultRequestTimeout
 		poolPeers  = fetchPeers(l, v)
 	)
 
-	if v := v.GetDuration(cfgConnectTimeout); v > 0 {
-		conTimeout = v
+	if val := v.GetDuration(cfgConnectTimeout); val > 0 {
+		conTimeout = val
 	} else {
 		l.Warn("invalid connection_timeout, default one will be used", zap.Duration("default", defaultConnectTimeout))
 	}
-	if v := v.GetDuration(cfgRequestTimeout); v > 0 {
-		reqTimeout = v
+	if val := v.GetDuration(cfgRequestTimeout); val > 0 {
+		reqTimeout = val
 	} else {
 		l.Warn("invalid request_timeout, default one will be used", zap.Duration("default", defaultRequestTimeout))
 	}
-	if v := v.GetDuration(cfgRebalanceTimer); v > 0 {
-		reBalance = v
+	if val := v.GetDuration(cfgRebalanceTimer); val > 0 {
+		reBalance = val
 	} else {
 		l.Warn("invalid rebalance_timeout, default one will be used", zap.Duration("default", defaultRebalanceTimer))
 	}
 
 	password := wallet.GetPassword(v, cfgWalletPassphrase)
-	if key, err = wallet.GetKeyFromPath(v.GetString(cfgWallet), v.GetString(cfgAddress), password); err != nil {
+	key, err := wallet.GetKeyFromPath(v.GetString(cfgWallet), v.GetString(cfgAddress), password)
+	if err != nil {
 		l.Fatal("could not load NeoFS private key", zap.Error(err))
 	}
 
 	l.Info("using credentials", zap.String("NeoFS", hex.EncodeToString(key.PublicKey().Bytes())))
 
-	opts := &pool.BuilderOptions{
-		Key:                     &key.PrivateKey,
-		NodeConnectionTimeout:   conTimeout,
-		NodeRequestTimeout:      reqTimeout,
-		ClientRebalanceInterval: reBalance,
+	var ownerID user.ID
+	user.IDFromKey(&ownerID, key.PrivateKey.PublicKey)
+
+	var prm pool.InitParameters
+	prm.SetKey(&key.PrivateKey)
+	prm.SetNodeDialTimeout(conTimeout)
+	prm.SetHealthcheckTimeout(reqTimeout)
+	prm.SetClientRebalanceInterval(reBalance)
+
+	for _, peer := range poolPeers {
+		prm.AddNode(peer)
 	}
-	conns, err = poolPeers.Build(ctx, opts)
+
+	conns, err := pool.NewPool(prm)
 	if err != nil {
 		l.Fatal("failed to create connection pool", zap.Error(err))
 	}
 
-	return handlers.NewApp(conns, l, sftpConfig)
+	if err = conns.Dial(ctx); err != nil {
+		l.Fatal("failed to dial connection pool", zap.Error(err))
+	}
+
+	return handlers.NewApp(conns, &ownerID, l, sftpConfig)
 }
 
 func server(app *handlers.App) {

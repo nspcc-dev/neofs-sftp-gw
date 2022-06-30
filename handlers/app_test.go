@@ -13,10 +13,11 @@ import (
 	"github.com/nspcc-dev/neo-go/pkg/crypto/keys"
 	"github.com/nspcc-dev/neofs-sdk-go/container"
 	cid "github.com/nspcc-dev/neofs-sdk-go/container/id"
+	"github.com/nspcc-dev/neofs-sdk-go/netmap"
 	"github.com/nspcc-dev/neofs-sdk-go/object"
 	oid "github.com/nspcc-dev/neofs-sdk-go/object/id"
-	"github.com/nspcc-dev/neofs-sdk-go/policy"
 	"github.com/nspcc-dev/neofs-sdk-go/pool"
+	"github.com/nspcc-dev/neofs-sdk-go/user"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -25,9 +26,16 @@ import (
 func TestSftpHandlers(t *testing.T) {
 	rootCtx := context.Background()
 	aioImage := "nspccdev/neofs-aio-testcontainer:"
-	versions := []string{"0.24.0", "0.25.1", "0.26.1", "0.27.0", "latest"}
+	versions := []string{
+		"0.27.7",
+		"0.28.1",
+		"latest",
+	}
 	key, err := keys.NewPrivateKeyFromHex("1dd37fba80fec4e6a6f13fd708d8dcb3b29def768017052f6c930fa1c5d90bbb")
 	require.NoError(t, err)
+
+	var ownerID user.ID
+	user.IDFromKey(&ownerID, key.PrivateKey.PublicKey)
 
 	for _, version := range versions {
 		ctx, cancel := context.WithCancel(rootCtx)
@@ -35,10 +43,10 @@ func TestSftpHandlers(t *testing.T) {
 		aioContainer := createDockerContainer(ctx, t, aioImage+version)
 
 		clientPool := getPool(ctx, t, key)
-		CID := createContainer(ctx, t, clientPool)
+		cnrID := createContainer(ctx, t, clientPool, &ownerID)
 
-		t.Run("test reader", func(t *testing.T) { testReader(ctx, t, clientPool, CID) })
-		t.Run("test writer", func(t *testing.T) { testWriter(ctx, t, clientPool, CID) })
+		t.Run("test reader", func(t *testing.T) { testReader(ctx, t, clientPool, &ownerID, cnrID) })
+		t.Run("test writer", func(t *testing.T) { testWriter(ctx, t, clientPool, &ownerID, cnrID) })
 
 		err = aioContainer.Terminate(ctx)
 		require.NoError(t, err)
@@ -46,15 +54,15 @@ func TestSftpHandlers(t *testing.T) {
 	}
 }
 
-func testReader(ctx context.Context, t *testing.T, clientPool pool.Pool, cnrID *cid.ID) {
+func testReader(ctx context.Context, t *testing.T, clientPool *pool.Pool, ownerID *user.ID, cnrID cid.ID) {
 	content := "content for read test"
-	id := putObject(ctx, t, clientPool, cnrID, content, nil)
+	id := putObject(ctx, t, clientPool, ownerID, cnrID, content, nil)
 
 	obj := &ObjectInfo{
 		Container: &ContainerInfo{
 			CID: cnrID,
 		},
-		OID:         id,
+		ObjectID:    id,
 		PayloadSize: int64(len(content)),
 	}
 
@@ -80,7 +88,7 @@ func testReader(ctx context.Context, t *testing.T, clientPool pool.Pool, cnrID *
 	require.Equal(t, content, buff.String())
 }
 
-func testWriter(ctx context.Context, t *testing.T, clientPool pool.Pool, cnrID *cid.ID) {
+func testWriter(ctx context.Context, t *testing.T, clientPool *pool.Pool, ownerID *user.ID, cnrID cid.ID) {
 	content := "content for write test"
 
 	obj := &ObjectInfo{
@@ -90,7 +98,7 @@ func testWriter(ctx context.Context, t *testing.T, clientPool pool.Pool, cnrID *
 		FileName: "write-test-object",
 	}
 
-	writer := newWriter(ctx, obj, clientPool)
+	writer := newWriter(ctx, obj, clientPool, ownerID)
 
 	_, err := writer.WriteAt(nil, -1)
 	require.Error(t, err)
@@ -129,71 +137,81 @@ func createDockerContainer(ctx context.Context, t *testing.T, image string) test
 	return aioC
 }
 
-func getPool(ctx context.Context, t *testing.T, key *keys.PrivateKey) pool.Pool {
-	pb := new(pool.Builder)
-	pb.AddNode("localhost:8080", 1, 1)
+func getPool(ctx context.Context, t *testing.T, key *keys.PrivateKey) *pool.Pool {
+	var prm pool.InitParameters
+	prm.SetKey(&key.PrivateKey)
+	prm.SetNodeDialTimeout(5 * time.Second)
+	prm.SetHealthcheckTimeout(5 * time.Second)
+	prm.AddNode(pool.NewNodeParam(1, "localhost:8080", 1))
 
-	opts := &pool.BuilderOptions{
-		Key:                   &key.PrivateKey,
-		NodeConnectionTimeout: 5 * time.Second,
-		NodeRequestTimeout:    5 * time.Second,
-	}
-	clientPool, err := pb.Build(ctx, opts)
+	clientPool, err := pool.NewPool(prm)
+	require.NoError(t, err)
+
+	err = clientPool.Dial(ctx)
 	require.NoError(t, err)
 	return clientPool
 }
 
-func createContainer(ctx context.Context, t *testing.T, clientPool pool.Pool) *cid.ID {
-	pp, err := policy.Parse("REP 1")
+func createContainer(ctx context.Context, t *testing.T, clientPool *pool.Pool, ownerID *user.ID) cid.ID {
+	var policy netmap.PlacementPolicy
+	err := policy.DecodeString("REP 1")
 	require.NoError(t, err)
 
 	cnr := container.New(
-		container.WithPolicy(pp),
+		container.WithPolicy(&policy),
 		container.WithCustomBasicACL(0x0FFFFFFF),
 		container.WithAttribute(container.AttributeName, "friendlyName"),
 		container.WithAttribute(container.AttributeTimestamp, strconv.FormatInt(time.Now().Unix(), 10)))
-	cnr.SetOwnerID(clientPool.OwnerID())
+	cnr.SetOwnerID(ownerID)
 
-	CID, err := clientPool.PutContainer(ctx, cnr)
+	var wp pool.WaitParams
+	wp.SetPollInterval(3 * time.Second)
+	wp.SetTimeout(15 * time.Second)
+
+	var prm pool.PrmContainerPut
+	prm.SetContainer(*cnr)
+
+	cnrID, err := clientPool.PutContainer(ctx, prm)
 	require.NoError(t, err)
-	fmt.Println(CID.String())
+	fmt.Println(cnrID.String())
 
-	err = clientPool.WaitForContainerPresence(ctx, CID, &pool.ContainerPollingParams{
-		CreationTimeout: 15 * time.Second,
-		PollInterval:    3 * time.Second,
-	})
-	require.NoError(t, err)
-
-	return CID
+	return *cnrID
 }
 
-func putObject(ctx context.Context, t *testing.T, clientPool pool.Pool, cnrID *cid.ID, content string, attributes map[string]string) *oid.ID {
+func putObject(ctx context.Context, t *testing.T, clientPool *pool.Pool, ownerID *user.ID, cnrID cid.ID, content string, attributes map[string]string) oid.ID {
 	obj := object.New()
 	obj.SetContainerID(cnrID)
-	obj.SetOwnerID(clientPool.OwnerID())
+	obj.SetOwnerID(ownerID)
 
-	var attrs []*object.Attribute
+	var attrs []object.Attribute
 	for key, val := range attributes {
 		attr := object.NewAttribute()
 		attr.SetKey(key)
 		attr.SetValue(val)
-		attrs = append(attrs, attr)
+		attrs = append(attrs, *attr)
 	}
 	obj.SetAttributes(attrs...)
 	obj.SetPayload([]byte(content))
 
-	id, err := clientPool.PutObject(ctx, *obj, nil)
+	var prm pool.PrmObjectPut
+	prm.SetHeader(*obj)
+
+	id, err := clientPool.PutObject(ctx, prm)
 	require.NoError(t, err)
 
-	return id
+	return *id
 }
 
-func getObjectByName(ctx context.Context, clientPool pool.Pool, cnrID *cid.ID, name string) ([]byte, error) {
+func getObjectByName(ctx context.Context, clientPool *pool.Pool, cnrID cid.ID, name string) ([]byte, error) {
 	filter := object.NewSearchFilters()
 	filter.AddRootFilter()
 	filter.AddFilter(object.AttributeFileName, name, object.MatchStringEqual)
 
-	res, err := clientPool.SearchObjects(ctx, *cnrID, filter)
+	var prm pool.PrmObjectSearch
+	prm.SetContainerID(cnrID)
+	prm.SetFilters(filter)
+
+	res, err := clientPool.SearchObjects(ctx, prm)
 	if err != nil {
 		return nil, fmt.Errorf("init searching using client: %w", err)
 	}
@@ -213,7 +231,10 @@ func getObjectByName(ctx context.Context, clientPool pool.Pool, cnrID *cid.ID, n
 		return nil, errors.New("found not exactly one object")
 	}
 
-	resObj, err := clientPool.GetObject(ctx, *newAddress(cnrID, &ids[0]))
+	var prmGet pool.PrmObjectGet
+	prmGet.SetAddress(newAddress(cnrID, ids[0]))
+
+	resObj, err := clientPool.GetObject(ctx, prmGet)
 	if err != nil {
 		return nil, err
 	}

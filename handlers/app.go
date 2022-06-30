@@ -14,9 +14,9 @@ import (
 	"github.com/nspcc-dev/neofs-sdk-go/container"
 	cid "github.com/nspcc-dev/neofs-sdk-go/container/id"
 	"github.com/nspcc-dev/neofs-sdk-go/object"
-	"github.com/nspcc-dev/neofs-sdk-go/object/address"
 	oid "github.com/nspcc-dev/neofs-sdk-go/object/id"
 	"github.com/nspcc-dev/neofs-sdk-go/pool"
+	"github.com/nspcc-dev/neofs-sdk-go/user"
 	"github.com/pkg/sftp"
 	"go.uber.org/zap"
 )
@@ -31,7 +31,8 @@ type (
 	App struct {
 		Log *zap.Logger
 
-		pool      pool.Pool
+		pool      *pool.Pool
+		owner     *user.ID
 		sftConfig *SftpServerConfig
 	}
 
@@ -48,27 +49,29 @@ type (
 	objReader struct {
 		ctx  context.Context
 		file *ObjectInfo
-		pool pool.Pool
+		pool *pool.Pool
 	}
 
 	objWriter struct {
 		ctx    context.Context
 		file   *ObjectInfo
-		pool   pool.Pool
+		pool   *pool.Pool
+		owner  *user.ID
 		buffer *bytes.Buffer
 	}
 )
 
 // NewApp creates handlers (implements sftp.FileReader, sftp.FileWriter, sftp.FileCmder, sftp.FileLister).
-func NewApp(conns pool.Pool, l *zap.Logger, sftpConfig *SftpServerConfig) *App {
+func NewApp(conns *pool.Pool, owner *user.ID, l *zap.Logger, sftpConfig *SftpServerConfig) *App {
 	return &App{
 		pool:      conns,
+		owner:     owner,
 		Log:       l,
 		sftConfig: sftpConfig,
 	}
 }
 
-func newReader(ctx context.Context, obj *ObjectInfo, conn pool.Pool) *objReader {
+func newReader(ctx context.Context, obj *ObjectInfo, conn *pool.Pool) *objReader {
 	return &objReader{
 		ctx:  ctx,
 		file: obj,
@@ -76,11 +79,12 @@ func newReader(ctx context.Context, obj *ObjectInfo, conn pool.Pool) *objReader 
 	}
 }
 
-func newWriter(ctx context.Context, obj *ObjectInfo, conn pool.Pool) *objWriter {
+func newWriter(ctx context.Context, obj *ObjectInfo, conn *pool.Pool, ownerID *user.ID) *objWriter {
 	return &objWriter{
 		ctx:    ctx,
 		file:   obj,
 		pool:   conn,
+		owner:  ownerID,
 		buffer: bytes.NewBuffer(nil),
 	}
 }
@@ -98,13 +102,17 @@ func (f ListerAt) ListAt(ls []os.FileInfo, offset int64) (int, error) {
 	return n, nil
 }
 
-func (a *App) listObjects(ctx context.Context, cnrID *cid.ID) ([]os.FileInfo, error) {
+func (a *App) listObjects(ctx context.Context, cnrID cid.ID) ([]os.FileInfo, error) {
 	var result []os.FileInfo
 
 	filters := object.NewSearchFilters()
 	filters.AddRootFilter()
 
-	res, err := a.pool.SearchObjects(ctx, *cnrID, filters)
+	var prm pool.PrmObjectSearch
+	prm.SetContainerID(cnrID)
+	prm.SetFilters(filters)
+
+	res, err := a.pool.SearchObjects(ctx, prm)
 	if err != nil {
 		return nil, fmt.Errorf("init searching: %w", err)
 	}
@@ -116,7 +124,7 @@ func (a *App) listObjects(ctx context.Context, cnrID *cid.ID) ([]os.FileInfo, er
 	var obj *ObjectInfo
 
 	err = res.Iterate(func(id oid.ID) bool {
-		obj, inErr = a.getObjectFile(ctx, newAddress(cnrID, &id))
+		obj, inErr = a.getObjectFile(ctx, newAddress(cnrID, id))
 		if err != nil {
 			return true
 		}
@@ -134,18 +142,20 @@ func (a *App) listObjects(ctx context.Context, cnrID *cid.ID) ([]os.FileInfo, er
 	return result, err
 }
 
-func (a *App) getObjectFile(ctx context.Context, address *address.Address) (*ObjectInfo, error) {
-	objMeta, err := a.pool.HeadObject(ctx, *address)
+func (a *App) getObjectFile(ctx context.Context, address oid.Address) (*ObjectInfo, error) {
+	var prm pool.PrmObjectHead
+	prm.SetAddress(address)
+	objMeta, err := a.pool.HeadObject(ctx, prm)
 	if err != nil {
 		return nil, err
 	}
 
 	file := &ObjectInfo{
-		FileName: address.ObjectID().String(),
+		FileName: address.Object().String(),
 		Container: &ContainerInfo{
-			CID: address.ContainerID(),
+			CID: address.Container(),
 		},
-		OID:         address.ObjectID(),
+		ObjectID:    address.Object(),
 		PayloadSize: int64(objMeta.PayloadSize()),
 		Created:     time.Now(),
 	}
@@ -168,35 +178,41 @@ func (a *App) getObjectFile(ctx context.Context, address *address.Address) (*Obj
 	return file, nil
 }
 
-func (a *App) getObjectFileByName(ctx context.Context, cnrID *cid.ID, name string) (*ObjectInfo, error) {
+func (a *App) getObjectFileByName(ctx context.Context, cnrID cid.ID, name string) (*ObjectInfo, error) {
 	filters := object.NewSearchFilters()
 	filters.AddRootFilter()
 	filters.AddFilter(object.AttributeFileName, name, object.MatchStringEqual)
 
-	res, err := a.pool.SearchObjects(ctx, *cnrID, filters)
+	var prm pool.PrmObjectSearch
+	prm.SetContainerID(cnrID)
+	prm.SetFilters(filters)
+
+	res, err := a.pool.SearchObjects(ctx, prm)
 	if err != nil {
 		return nil, fmt.Errorf("init searching: %w", err)
 	}
 	defer res.Close()
 
-	var objId *oid.ID
+	var objID *oid.ID
 	err = res.Iterate(func(id oid.ID) bool {
-		objId = &id
+		objID = &id
 		return true
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	if objId == nil {
+	if objID == nil {
 		return nil, fmt.Errorf("not found")
 	}
 
-	return a.getObjectFile(ctx, newAddress(cnrID, objId))
+	return a.getObjectFile(ctx, newAddress(cnrID, *objID))
 }
 
-func (a *App) getContainer(ctx context.Context, cnrID *cid.ID) (*ContainerInfo, error) {
-	ctnr, err := a.pool.GetContainer(ctx, cnrID)
+func (a *App) getContainer(ctx context.Context, cnrID cid.ID) (*ContainerInfo, error) {
+	var prm pool.PrmContainerGet
+	prm.SetContainerID(cnrID)
+	ctnr, err := a.pool.GetContainer(ctx, prm)
 	if err != nil {
 		return nil, err
 	}
@@ -224,7 +240,11 @@ func (a *App) getContainer(ctx context.Context, cnrID *cid.ID) (*ContainerInfo, 
 
 func (a *App) listContainers(ctx context.Context) ([]os.FileInfo, error) {
 	var result []os.FileInfo
-	containers, err := a.pool.ListContainers(ctx, a.pool.OwnerID())
+
+	var prm pool.PrmContainerList
+	prm.SetOwnerID(*a.owner)
+
+	containers, err := a.pool.ListContainers(ctx, prm)
 	if err != nil {
 		return nil, err
 	}
@@ -248,7 +268,11 @@ func (a *App) listContainers(ctx context.Context) ([]os.FileInfo, error) {
 
 func (a *App) getContainers(ctx context.Context) ([]*ContainerInfo, error) {
 	var result []*ContainerInfo
-	containers, err := a.pool.ListContainers(ctx, a.pool.OwnerID())
+
+	var prm pool.PrmContainerList
+	prm.SetOwnerID(*a.owner)
+
+	containers, err := a.pool.ListContainers(ctx, prm)
 	if err != nil {
 		return nil, err
 	}
@@ -271,9 +295,9 @@ func (a *App) getContainers(ctx context.Context) ([]*ContainerInfo, error) {
 }
 
 func (a *App) getContainerByName(ctx context.Context, name string) (*ContainerInfo, error) {
-	CID := cid.New()
-	if err := CID.Parse(name); err == nil {
-		return a.getContainer(ctx, CID)
+	var cnrID cid.ID
+	if err := cnrID.DecodeString(name); err == nil {
+		return a.getContainer(ctx, cnrID)
 	}
 
 	containers, err := a.getContainers(ctx)
@@ -317,8 +341,8 @@ func (a *App) getFileStat(ctx context.Context, path string) (os.FileInfo, error)
 	}
 
 	if len(split) == 2 && len(split[1]) > 0 {
-		id := oid.NewID()
-		if err := id.Parse(split[1]); err != nil {
+		var id oid.ID
+		if err = id.DecodeString(split[1]); err != nil {
 			return nil, err
 		}
 
@@ -345,14 +369,20 @@ func (a *App) deleteNeofsFile(ctx context.Context, path string) error {
 		if err != nil {
 			return err
 		}
-		return a.pool.DeleteObject(ctx, *newAddress(cntr.CID, obj.OID))
+
+		var prm pool.PrmObjectDelete
+		prm.SetAddress(newAddress(cntr.CID, obj.ObjectID))
+
+		return a.pool.DeleteObject(ctx, prm)
 	}
 
 	return a.deleteContainer(ctx, cntr.CID)
 }
 
-func (a *App) deleteContainer(ctx context.Context, cnrID *cid.ID) error {
-	return a.pool.DeleteContainer(ctx, cnrID)
+func (a *App) deleteContainer(ctx context.Context, cnrID cid.ID) error {
+	var prm pool.PrmContainerDelete
+	prm.SetContainerID(cnrID)
+	return a.pool.DeleteContainer(ctx, prm)
 }
 
 // Filecmd called for Methods: Setstat, Rename, Rmdir, Mkdir, Link, Symlink, Remove.
@@ -388,7 +418,7 @@ func (a *App) Filewrite(r *sftp.Request) (io.WriterAt, error) {
 		Container: ctnr,
 	}
 
-	return newWriter(r.Context(), obj, a.pool), nil
+	return newWriter(r.Context(), obj, a.pool, a.owner), nil
 }
 
 // Fileread prepares io.ReaderAt to download file.
@@ -429,15 +459,15 @@ func (a *App) Filelist(r *sftp.Request) (sftp.ListerAt, error) {
 	return nil, errors.New("unsupported")
 }
 
-func newAddress(cid *cid.ID, oid *oid.ID) *address.Address {
-	addr := address.NewAddress()
-	addr.SetContainerID(cid)
-	addr.SetObjectID(oid)
+func newAddress(cnrID cid.ID, objID oid.ID) oid.Address {
+	var addr oid.Address
+	addr.SetContainer(cnrID)
+	addr.SetObject(objID)
 	return addr
 }
 
 func (w *objWriter) Close() error {
-	attributes := make([]*object.Attribute, 0, 2)
+	attributes := make([]object.Attribute, 0, 2)
 	filename := object.NewAttribute()
 	filename.SetKey(object.AttributeFileName)
 	filename.SetValue(w.file.Name())
@@ -446,14 +476,18 @@ func (w *objWriter) Close() error {
 	createdAt.SetKey(object.AttributeTimestamp)
 	createdAt.SetValue(strconv.FormatInt(time.Now().UTC().Unix(), 10))
 
-	attributes = append(attributes, filename, createdAt)
+	attributes = append(attributes, *filename, *createdAt)
 
 	obj := object.New()
-	obj.SetOwnerID(w.pool.OwnerID())
+	obj.SetOwnerID(w.owner)
 	obj.SetContainerID(w.file.Container.CID)
 	obj.SetAttributes(attributes...)
 
-	_, err := w.pool.PutObject(w.ctx, *obj, w.buffer)
+	var prm pool.PrmObjectPut
+	prm.SetHeader(*obj)
+	prm.SetPayload(w.buffer)
+
+	_, err := w.pool.PutObject(w.ctx, prm)
 	return err
 }
 
@@ -480,8 +514,14 @@ func (r *objReader) ReadAt(b []byte, off int64) (n int, err error) {
 		length = availableLength
 	}
 
-	addr := newAddress(r.file.Container.CID, r.file.OID)
-	res, err := r.pool.ObjectRange(r.ctx, *addr, uint64(off), length)
+	addr := newAddress(r.file.Container.CID, r.file.ObjectID)
+
+	var prm pool.PrmObjectRange
+	prm.SetAddress(addr)
+	prm.SetOffset(uint64(off))
+	prm.SetLength(length)
+
+	res, err := r.pool.ObjectRange(r.ctx, prm)
 	if err != nil {
 		return 0, err
 	}
