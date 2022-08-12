@@ -2,7 +2,7 @@
 
 # Common variables
 REPO ?= $(shell go list -m)
-VERSION ?= $(shell git describe --tags --always 2>/dev/null || cat VERSION 2>/dev/null || echo "develop")
+VERSION ?= $(shell git describe --tags --match "v*" --always 2>/dev/null || cat VERSION 2>/dev/null || echo "develop")
 BINDIR = bin
 DIRS = $(BINDIR)
 BINS = "$(BINDIR)/neofs-sftp-gw"
