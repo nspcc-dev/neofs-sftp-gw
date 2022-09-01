@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strconv"
 	"testing"
 	"time"
 
@@ -29,6 +28,7 @@ func TestSftpHandlers(t *testing.T) {
 	versions := []string{
 		"0.27.7",
 		"0.28.1",
+		"0.29.0",
 		"latest",
 	}
 	key, err := keys.NewPrivateKeyFromHex("1dd37fba80fec4e6a6f13fd708d8dcb3b29def768017052f6c930fa1c5d90bbb")
@@ -43,7 +43,7 @@ func TestSftpHandlers(t *testing.T) {
 		aioContainer := createDockerContainer(ctx, t, aioImage+version)
 
 		clientPool := getPool(ctx, t, key)
-		cnrID := createContainer(ctx, t, clientPool, &ownerID)
+		cnrID := createContainer(ctx, t, clientPool, ownerID)
 
 		t.Run("test reader", func(t *testing.T) { testReader(ctx, t, clientPool, &ownerID, cnrID) })
 		t.Run("test writer", func(t *testing.T) { testWriter(ctx, t, clientPool, &ownerID, cnrID) })
@@ -152,30 +152,32 @@ func getPool(ctx context.Context, t *testing.T, key *keys.PrivateKey) *pool.Pool
 	return clientPool
 }
 
-func createContainer(ctx context.Context, t *testing.T, clientPool *pool.Pool, ownerID *user.ID) cid.ID {
+func createContainer(ctx context.Context, t *testing.T, clientPool *pool.Pool, ownerID user.ID) cid.ID {
 	var policy netmap.PlacementPolicy
 	err := policy.DecodeString("REP 1")
 	require.NoError(t, err)
 
-	cnr := container.New(
-		container.WithPolicy(&policy),
-		container.WithCustomBasicACL(0x0FFFFFFF),
-		container.WithAttribute(container.AttributeName, "friendlyName"),
-		container.WithAttribute(container.AttributeTimestamp, strconv.FormatInt(time.Now().Unix(), 10)))
-	cnr.SetOwnerID(ownerID)
+	var cnr container.Container
+	cnr.Init()
+	cnr.SetPlacementPolicy(policy)
+	cnr.SetBasicACL(0x0FFFFFFF)
+	cnr.SetOwner(ownerID)
+
+	container.SetName(&cnr, "friendlyName")
+	container.SetCreationTime(&cnr, time.Now())
 
 	var wp pool.WaitParams
 	wp.SetPollInterval(3 * time.Second)
 	wp.SetTimeout(15 * time.Second)
 
 	var prm pool.PrmContainerPut
-	prm.SetContainer(*cnr)
+	prm.SetContainer(cnr)
 
 	cnrID, err := clientPool.PutContainer(ctx, prm)
 	require.NoError(t, err)
 	fmt.Println(cnrID.String())
 
-	return *cnrID
+	return cnrID
 }
 
 func putObject(ctx context.Context, t *testing.T, clientPool *pool.Pool, ownerID *user.ID, cnrID cid.ID, content string, attributes map[string]string) oid.ID {
@@ -199,7 +201,7 @@ func putObject(ctx context.Context, t *testing.T, clientPool *pool.Pool, ownerID
 	id, err := clientPool.PutObject(ctx, prm)
 	require.NoError(t, err)
 
-	return *id
+	return id
 }
 
 func getObjectByName(ctx context.Context, clientPool *pool.Pool, cnrID cid.ID, name string) ([]byte, error) {
