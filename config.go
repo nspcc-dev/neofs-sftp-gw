@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/nspcc-dev/neofs-sdk-go/pool"
 	"github.com/nspcc-dev/neofs-sftp-gw/handlers"
+	"github.com/nspcc-dev/neofs-sftp-gw/internal/version"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
@@ -114,6 +116,7 @@ func newSettings() (*viper.Viper, *handlers.SftpServerConfig, devConfig) {
 	flags.BoolVarP(&sftpConfig.ReadOnly, "read-only", "R", false, "read-only server")
 	flags.BoolVarP(&sftpConfig.DebugStderr, "debug-stderr", "e", false, "debug to stderr")
 	flags.StringVarP(&sftpConfig.DebugLevel, "debug-level", "l", "ERROR", "debug level")
+	versionFlag := flags.BoolP("version", "v", false, "show version")
 
 	config := flags.String(cfgConfigPath, "", "config path")
 
@@ -132,6 +135,11 @@ func newSettings() (*viper.Viper, *handlers.SftpServerConfig, devConfig) {
 	}
 	if err := flags.Parse(os.Args); err != nil {
 		panic(err)
+	}
+
+	if versionFlag != nil && *versionFlag {
+		fmt.Printf("NeoFS SFTP Gateway\nVersion: %s\nGoVersion: %s\n", version.Version, runtime.Version())
+		os.Exit(0)
 	}
 
 	if !v.IsSet(cfgConfigPath) {
