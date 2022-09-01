@@ -212,27 +212,23 @@ func (a *App) getObjectFileByName(ctx context.Context, cnrID cid.ID, name string
 func (a *App) getContainer(ctx context.Context, cnrID cid.ID) (*ContainerInfo, error) {
 	var prm pool.PrmContainerGet
 	prm.SetContainerID(cnrID)
-	ctnr, err := a.pool.GetContainer(ctx, prm)
+	cnr, err := a.pool.GetContainer(ctx, prm)
 	if err != nil {
 		return nil, err
 	}
 
 	file := &ContainerInfo{
-		FileName: cnrID.String(),
+		FileName: cnrID.EncodeToString(),
 		CID:      cnrID,
 		Created:  time.Now(),
 	}
 
-	for _, attr := range ctnr.Attributes() {
-		if attr.Key() == container.AttributeTimestamp {
-			unix, err := strconv.ParseInt(attr.Value(), 10, 64)
-			if err == nil {
-				file.Created = time.Unix(unix, 0)
-			}
-		}
-		if attr.Key() == container.AttributeName {
-			file.FileName = attr.Value()
-		}
+	if cnrName := container.Name(cnr); len(cnrName) != 0 {
+		file.FileName = cnrName
+	}
+
+	if createdTime := container.CreatedAt(cnr); createdTime.IsZero() {
+		file.Created = createdTime
 	}
 
 	return file, nil
@@ -252,16 +248,16 @@ func (a *App) listContainers(ctx context.Context) ([]os.FileInfo, error) {
 	existedFiles := make(map[string]struct{}, len(containers))
 
 	for _, CID := range containers {
-		ctnr, err := a.getContainer(ctx, CID)
+		cnr, err := a.getContainer(ctx, CID)
 		if err != nil {
 			return nil, err
 		}
 
-		if _, ok := existedFiles[ctnr.Name()]; ok {
+		if _, ok := existedFiles[cnr.Name()]; ok {
 			continue
 		}
-		existedFiles[ctnr.Name()] = struct{}{}
-		result = append(result, ctnr)
+		existedFiles[cnr.Name()] = struct{}{}
+		result = append(result, cnr)
 	}
 	return result, nil
 }
@@ -280,16 +276,16 @@ func (a *App) getContainers(ctx context.Context) ([]*ContainerInfo, error) {
 	existedFiles := make(map[string]struct{}, len(containers))
 
 	for _, CID := range containers {
-		ctnr, err := a.getContainer(ctx, CID)
+		cnr, err := a.getContainer(ctx, CID)
 		if err != nil {
 			return nil, err
 		}
 
-		if _, ok := existedFiles[ctnr.Name()]; ok {
+		if _, ok := existedFiles[cnr.Name()]; ok {
 			continue
 		}
-		existedFiles[ctnr.Name()] = struct{}{}
-		result = append(result, ctnr)
+		existedFiles[cnr.Name()] = struct{}{}
+		result = append(result, cnr)
 	}
 	return result, nil
 }
@@ -305,9 +301,9 @@ func (a *App) getContainerByName(ctx context.Context, name string) (*ContainerIn
 		return nil, err
 	}
 
-	for _, ctnr := range containers {
-		if ctnr.Name() == name {
-			return ctnr, nil
+	for _, cnr := range containers {
+		if cnr.Name() == name {
+			return cnr, nil
 		}
 	}
 
@@ -320,12 +316,12 @@ func (a *App) listPath(ctx context.Context, path string) ([]os.FileInfo, error) 
 		return a.listContainers(ctx)
 	}
 
-	ctnr, err := a.getContainerByName(ctx, path)
+	cnr, err := a.getContainerByName(ctx, path)
 	if err != nil {
 		return nil, err
 	}
 
-	return a.listObjects(ctx, ctnr.CID)
+	return a.listObjects(ctx, cnr.CID)
 }
 
 func (a *App) getFileStat(ctx context.Context, path string) (os.FileInfo, error) {
@@ -335,7 +331,7 @@ func (a *App) getFileStat(ctx context.Context, path string) (os.FileInfo, error)
 	}
 	split := strings.Split(path, delimiter)
 
-	ctnr, err := a.getContainerByName(ctx, split[0])
+	cnr, err := a.getContainerByName(ctx, split[0])
 	if err != nil {
 		return nil, err
 	}
@@ -346,14 +342,14 @@ func (a *App) getFileStat(ctx context.Context, path string) (os.FileInfo, error)
 			return nil, err
 		}
 
-		obj, err := a.getObjectFile(ctx, newAddress(ctnr.CID, id))
+		obj, err := a.getObjectFile(ctx, newAddress(cnr.CID, id))
 		if err != nil {
 			return nil, err
 		}
 		return obj, nil
 	}
 
-	return ctnr, nil
+	return cnr, nil
 }
 
 func (a *App) deleteNeofsFile(ctx context.Context, path string) error {
@@ -408,14 +404,14 @@ func (a *App) Filewrite(r *sftp.Request) (io.WriterAt, error) {
 	}
 	trimmed := strings.TrimPrefix(r.Filepath, delimiter)
 	split := strings.Split(trimmed, delimiter)
-	ctnr, err := a.getContainerByName(r.Context(), split[0])
+	cnr, err := a.getContainerByName(r.Context(), split[0])
 	if err != nil {
 		return nil, err
 	}
 
 	obj := &ObjectInfo{
 		FileName:  strings.TrimPrefix(trimmed, split[0]+delimiter),
-		Container: ctnr,
+		Container: cnr,
 	}
 
 	return newWriter(r.Context(), obj, a.pool, a.owner), nil
@@ -526,7 +522,7 @@ func (r *objReader) ReadAt(b []byte, off int64) (n int, err error) {
 		return 0, err
 	}
 
-	n, err = io.ReadFull(res, b)
+	n, err = io.ReadFull(&res, b)
 	if n < len(b) {
 		err = io.EOF
 	}
