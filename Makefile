@@ -2,13 +2,16 @@
 
 # Common variables
 REPO ?= $(shell go list -m)
-VERSION ?= $(shell git describe --tags --girty --match "v*" --always 2>/dev/null || cat VERSION 2>/dev/null || echo "develop")
+VERSION ?= $(shell git describe --tags --dirty --abbrev=8 --match "v*" --always 2>/dev/null || cat VERSION 2>/dev/null || echo "develop")
+
+GO_VERSION ?= 1.19
+LINT_VERSION ?= 1.49.0
 
 BINDIR = bin
 DIRS = $(BINDIR)
 BINS = "$(BINDIR)/neofs-sftp-gw"
 
-.PHONY: help all dep clean format test cover lint
+.PHONY: help all dep clean format test cover lint docker/all docker/lint docker/bin/neofs-sftp-gw
 
 # Make all binaries
 all: $(BINS)
@@ -32,6 +35,26 @@ dep:
 	@printf "⇒ Tidy requirements: "
 	@CGO_ENABLED=0 \
 	go mod tidy -v && echo OK
+
+# Run `make %` in Golang container
+docker/%:
+	$(if $(filter $*,all $(BINS)), \
+		@echo "=> Running 'make $*' in clean Docker environment" && \
+		docker run --rm -t \
+		  -v `pwd`:/src \
+		  -w /src \
+		  -u `stat -c "%u:%g" .` \
+		  --env HOME=/src \
+		  golang:$(GO_VERSION) make $*,\
+	  	@echo "supported docker targets: all $(BINS) lint")
+
+# Run linters in Docker
+docker/lint:
+	docker run --rm -it \
+	-v `pwd`:/src \
+	-u `stat -c "%u:%g" .` \
+	--env HOME=/src \
+	golangci/golangci-lint:v$(LINT_VERSION) bash -c 'cd /src/ && make lint'
 
 # Run tests
 test:
@@ -70,5 +93,6 @@ help:
 
 # Clean up
 clean:
+	rm -rf .cache
 	rm -rf $(BINDIR)
 

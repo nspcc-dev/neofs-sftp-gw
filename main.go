@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"os"
 	"os/signal"
@@ -129,7 +128,7 @@ func devServer(app *handlers.App, devConf devConfig) {
 		},
 	}
 
-	privateBytes, err := ioutil.ReadFile(devConf.SSHKeyPath)
+	privateBytes, err := os.ReadFile(devConf.SSHKeyPath)
 	if err != nil {
 		app.Log.Fatal("Failed to load private key", zap.Error(err))
 	}
