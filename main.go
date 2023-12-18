@@ -9,7 +9,9 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/nspcc-dev/neofs-sdk-go/client"
 	"github.com/nspcc-dev/neofs-sdk-go/pool"
 	"github.com/nspcc-dev/neofs-sdk-go/user"
 	"github.com/nspcc-dev/neofs-sftp-gw/handlers"
@@ -65,11 +67,11 @@ func newHandler(ctx context.Context, l *zap.Logger, v *viper.Viper, sftpConfig *
 
 	l.Info("using credentials", zap.String("NeoFS", hex.EncodeToString(key.PublicKey().Bytes())))
 
-	var ownerID user.ID
-	user.IDFromKey(&ownerID, key.PrivateKey.PublicKey)
+	signer := user.NewAutoIDSignerRFC6979(key.PrivateKey)
+	ownerID := signer.UserID()
 
 	var prm pool.InitParameters
-	prm.SetKey(&key.PrivateKey)
+	prm.SetSigner(signer)
 	prm.SetNodeDialTimeout(conTimeout)
 	prm.SetHealthcheckTimeout(reqTimeout)
 	prm.SetClientRebalanceInterval(reBalance)
@@ -87,7 +89,15 @@ func newHandler(ctx context.Context, l *zap.Logger, v *viper.Viper, sftpConfig *
 		l.Fatal("failed to dial connection pool", zap.Error(err))
 	}
 
-	return handlers.NewApp(conns, &ownerID, l, sftpConfig)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	ni, err := conns.NetworkInfo(ctx, client.PrmNetworkInfo{})
+	if err != nil {
+		l.Fatal("failed to get network info", zap.Error(err))
+	}
+
+	return handlers.NewApp(conns, signer, &ownerID, l, sftpConfig, ni.MaxObjectSize())
 }
 
 func server(app *handlers.App) {

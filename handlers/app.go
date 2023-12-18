@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nspcc-dev/neofs-sdk-go/container"
+	"github.com/nspcc-dev/neofs-sdk-go/client"
 	cid "github.com/nspcc-dev/neofs-sdk-go/container/id"
 	"github.com/nspcc-dev/neofs-sdk-go/object"
 	oid "github.com/nspcc-dev/neofs-sdk-go/object/id"
@@ -31,9 +31,11 @@ type (
 	App struct {
 		Log *zap.Logger
 
-		pool      *pool.Pool
-		owner     *user.ID
-		sftConfig *SftpServerConfig
+		pool          *pool.Pool
+		owner         *user.ID
+		signer        user.Signer
+		sftConfig     *SftpServerConfig
+		maxObjectSize uint64
 	}
 
 	// SftpServerConfig is openssh sftp subsystem params.
@@ -47,45 +49,53 @@ type (
 	ListerAt []os.FileInfo
 
 	objReader struct {
-		ctx  context.Context
-		file *ObjectInfo
-		pool *pool.Pool
-	}
-
-	objWriter struct {
 		ctx    context.Context
 		file   *ObjectInfo
 		pool   *pool.Pool
-		owner  *user.ID
-		buffer *bytes.Buffer
+		signer user.Signer
+	}
+
+	objWriter struct {
+		ctx           context.Context
+		file          *ObjectInfo
+		pool          *pool.Pool
+		owner         *user.ID
+		signer        user.Signer
+		buffer        *bytes.Buffer
+		maxObjectSize uint64
 	}
 )
 
 // NewApp creates handlers (implements sftp.FileReader, sftp.FileWriter, sftp.FileCmder, sftp.FileLister).
-func NewApp(conns *pool.Pool, owner *user.ID, l *zap.Logger, sftpConfig *SftpServerConfig) *App {
+func NewApp(conns *pool.Pool, signer user.Signer, owner *user.ID, l *zap.Logger, sftpConfig *SftpServerConfig, maxObjectSize uint64) *App {
 	return &App{
-		pool:      conns,
-		owner:     owner,
-		Log:       l,
-		sftConfig: sftpConfig,
+		pool:          conns,
+		signer:        signer,
+		owner:         owner,
+		Log:           l,
+		sftConfig:     sftpConfig,
+		maxObjectSize: maxObjectSize,
 	}
 }
 
-func newReader(ctx context.Context, obj *ObjectInfo, conn *pool.Pool) *objReader {
+func newReader(ctx context.Context, obj *ObjectInfo, conn *pool.Pool, signer user.Signer) *objReader {
 	return &objReader{
-		ctx:  ctx,
-		file: obj,
-		pool: conn,
-	}
-}
-
-func newWriter(ctx context.Context, obj *ObjectInfo, conn *pool.Pool, ownerID *user.ID) *objWriter {
-	return &objWriter{
 		ctx:    ctx,
 		file:   obj,
 		pool:   conn,
-		owner:  ownerID,
-		buffer: bytes.NewBuffer(nil),
+		signer: signer,
+	}
+}
+
+func newWriter(ctx context.Context, obj *ObjectInfo, conn *pool.Pool, ownerID *user.ID, signer user.Signer, maxObjectSize uint64) *objWriter {
+	return &objWriter{
+		ctx:           ctx,
+		file:          obj,
+		pool:          conn,
+		owner:         ownerID,
+		buffer:        bytes.NewBuffer(nil),
+		signer:        signer,
+		maxObjectSize: maxObjectSize,
 	}
 }
 
@@ -108,11 +118,10 @@ func (a *App) listObjects(ctx context.Context, cnrID cid.ID) ([]os.FileInfo, err
 	filters := object.NewSearchFilters()
 	filters.AddRootFilter()
 
-	var prm pool.PrmObjectSearch
-	prm.SetContainerID(cnrID)
+	var prm client.PrmObjectSearch
 	prm.SetFilters(filters)
 
-	res, err := a.pool.SearchObjects(ctx, prm)
+	res, err := a.pool.ObjectSearchInit(ctx, cnrID, a.signer, prm)
 	if err != nil {
 		return nil, fmt.Errorf("init searching: %w", err)
 	}
@@ -143,9 +152,8 @@ func (a *App) listObjects(ctx context.Context, cnrID cid.ID) ([]os.FileInfo, err
 }
 
 func (a *App) getObjectFile(ctx context.Context, address oid.Address) (*ObjectInfo, error) {
-	var prm pool.PrmObjectHead
-	prm.SetAddress(address)
-	objMeta, err := a.pool.HeadObject(ctx, prm)
+	var prm client.PrmObjectHead
+	objMeta, err := a.pool.ObjectHead(ctx, address.Container(), address.Object(), a.signer, prm)
 	if err != nil {
 		return nil, err
 	}
@@ -183,11 +191,10 @@ func (a *App) getObjectFileByName(ctx context.Context, cnrID cid.ID, name string
 	filters.AddRootFilter()
 	filters.AddFilter(object.AttributeFileName, name, object.MatchStringEqual)
 
-	var prm pool.PrmObjectSearch
-	prm.SetContainerID(cnrID)
+	var prm client.PrmObjectSearch
 	prm.SetFilters(filters)
 
-	res, err := a.pool.SearchObjects(ctx, prm)
+	res, err := a.pool.ObjectSearchInit(ctx, cnrID, a.signer, prm)
 	if err != nil {
 		return nil, fmt.Errorf("init searching: %w", err)
 	}
@@ -210,9 +217,8 @@ func (a *App) getObjectFileByName(ctx context.Context, cnrID cid.ID, name string
 }
 
 func (a *App) getContainer(ctx context.Context, cnrID cid.ID) (*ContainerInfo, error) {
-	var prm pool.PrmContainerGet
-	prm.SetContainerID(cnrID)
-	cnr, err := a.pool.GetContainer(ctx, prm)
+	var prm client.PrmContainerGet
+	cnr, err := a.pool.ContainerGet(ctx, cnrID, prm)
 	if err != nil {
 		return nil, err
 	}
@@ -223,11 +229,11 @@ func (a *App) getContainer(ctx context.Context, cnrID cid.ID) (*ContainerInfo, e
 		Created:  time.Now(),
 	}
 
-	if cnrName := container.Name(cnr); len(cnrName) != 0 {
+	if cnrName := cnr.Name(); len(cnrName) != 0 {
 		file.FileName = cnrName
 	}
 
-	if createdTime := container.CreatedAt(cnr); createdTime.IsZero() {
+	if createdTime := cnr.CreatedAt(); createdTime.IsZero() {
 		file.Created = createdTime
 	}
 
@@ -237,10 +243,8 @@ func (a *App) getContainer(ctx context.Context, cnrID cid.ID) (*ContainerInfo, e
 func (a *App) listContainers(ctx context.Context) ([]os.FileInfo, error) {
 	var result []os.FileInfo
 
-	var prm pool.PrmContainerList
-	prm.SetOwnerID(*a.owner)
-
-	containers, err := a.pool.ListContainers(ctx, prm)
+	var prm client.PrmContainerList
+	containers, err := a.pool.ContainerList(ctx, *a.owner, prm)
 	if err != nil {
 		return nil, err
 	}
@@ -265,10 +269,8 @@ func (a *App) listContainers(ctx context.Context) ([]os.FileInfo, error) {
 func (a *App) getContainers(ctx context.Context) ([]*ContainerInfo, error) {
 	var result []*ContainerInfo
 
-	var prm pool.PrmContainerList
-	prm.SetOwnerID(*a.owner)
-
-	containers, err := a.pool.ListContainers(ctx, prm)
+	var prm client.PrmContainerList
+	containers, err := a.pool.ContainerList(ctx, *a.owner, prm)
 	if err != nil {
 		return nil, err
 	}
@@ -366,19 +368,18 @@ func (a *App) deleteNeofsFile(ctx context.Context, path string) error {
 			return err
 		}
 
-		var prm pool.PrmObjectDelete
-		prm.SetAddress(newAddress(cntr.CID, obj.ObjectID))
+		var prm client.PrmObjectDelete
 
-		return a.pool.DeleteObject(ctx, prm)
+		_, err = a.pool.ObjectDelete(ctx, cntr.CID, obj.ObjectID, a.signer, prm)
+		return err
 	}
 
 	return a.deleteContainer(ctx, cntr.CID)
 }
 
 func (a *App) deleteContainer(ctx context.Context, cnrID cid.ID) error {
-	var prm pool.PrmContainerDelete
-	prm.SetContainerID(cnrID)
-	return a.pool.DeleteContainer(ctx, prm)
+	var prm client.PrmContainerDelete
+	return a.pool.ContainerDelete(ctx, cnrID, a.signer, prm)
 }
 
 // Filecmd called for Methods: Setstat, Rename, Rmdir, Mkdir, Link, Symlink, Remove.
@@ -414,7 +415,7 @@ func (a *App) Filewrite(r *sftp.Request) (io.WriterAt, error) {
 		Container: cnr,
 	}
 
-	return newWriter(r.Context(), obj, a.pool, a.owner), nil
+	return newWriter(r.Context(), obj, a.pool, a.owner, a.signer, a.maxObjectSize), nil
 }
 
 // Fileread prepares io.ReaderAt to download file.
@@ -430,7 +431,7 @@ func (a *App) Fileread(r *sftp.Request) (io.ReaderAt, error) {
 		return nil, fmt.Errorf("couldn't get file stat")
 	}
 
-	return newReader(r.Context(), obj, a.pool), nil
+	return newReader(r.Context(), obj, a.pool, a.signer), nil
 }
 
 // Filelist returns files information.
@@ -479,11 +480,22 @@ func (w *objWriter) Close() error {
 	obj.SetContainerID(w.file.Container.CID)
 	obj.SetAttributes(attributes...)
 
-	var prm pool.PrmObjectPut
-	prm.SetHeader(*obj)
-	prm.SetPayload(w.buffer)
+	var prm client.PrmObjectPutInit
 
-	_, err := w.pool.PutObject(w.ctx, prm)
+	writer, err := w.pool.ObjectPutInit(w.ctx, *obj, w.signer, prm)
+	if err != nil {
+		return fmt.Errorf("ObjectPutInit: %w", err)
+	}
+
+	chunk := make([]byte, w.maxObjectSize)
+	if _, err = io.CopyBuffer(writer, w.buffer, chunk); err != nil {
+		return fmt.Errorf("CopyBuffer: %w", err)
+	}
+
+	if err = writer.Close(); err != nil {
+		return fmt.Errorf("writer close: %w", err)
+	}
+
 	return err
 }
 
@@ -512,17 +524,14 @@ func (r *objReader) ReadAt(b []byte, off int64) (n int, err error) {
 
 	addr := newAddress(r.file.Container.CID, r.file.ObjectID)
 
-	var prm pool.PrmObjectRange
-	prm.SetAddress(addr)
-	prm.SetOffset(uint64(off))
-	prm.SetLength(length)
+	var prm client.PrmObjectRange
 
-	res, err := r.pool.ObjectRange(r.ctx, prm)
+	res, err := r.pool.ObjectRangeInit(r.ctx, addr.Container(), addr.Object(), uint64(off), length, r.signer, prm)
 	if err != nil {
 		return 0, err
 	}
 
-	n, err = io.ReadFull(&res, b)
+	n, err = io.ReadFull(res, b)
 	if n < len(b) {
 		err = io.EOF
 	}

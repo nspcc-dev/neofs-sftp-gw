@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/nspcc-dev/neo-go/pkg/crypto/keys"
+	"github.com/nspcc-dev/neofs-sdk-go/client"
 	"github.com/nspcc-dev/neofs-sdk-go/container"
 	cid "github.com/nspcc-dev/neofs-sdk-go/container/id"
 	"github.com/nspcc-dev/neofs-sdk-go/netmap"
@@ -17,6 +18,7 @@ import (
 	oid "github.com/nspcc-dev/neofs-sdk-go/object/id"
 	"github.com/nspcc-dev/neofs-sdk-go/pool"
 	"github.com/nspcc-dev/neofs-sdk-go/user"
+	"github.com/nspcc-dev/neofs-sdk-go/waiter"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -34,19 +36,20 @@ func TestSftpHandlers(t *testing.T) {
 	key, err := keys.NewPrivateKeyFromHex("1dd37fba80fec4e6a6f13fd708d8dcb3b29def768017052f6c930fa1c5d90bbb")
 	require.NoError(t, err)
 
-	var ownerID user.ID
-	user.IDFromKey(&ownerID, key.PrivateKey.PublicKey)
+	signer := user.NewAutoIDSignerRFC6979(key.PrivateKey)
+
+	var ownerID = signer.UserID()
 
 	for _, version := range versions {
 		ctx, cancel := context.WithCancel(rootCtx)
 
 		aioContainer := createDockerContainer(ctx, t, version)
 
-		clientPool := getPool(ctx, t, key)
-		cnrID := createContainer(ctx, t, clientPool, ownerID)
+		clientPool := getPool(ctx, t, signer)
+		cnrID := createContainer(ctx, t, clientPool, ownerID, signer)
 
-		t.Run("test reader", func(t *testing.T) { testReader(ctx, t, clientPool, &ownerID, cnrID) })
-		t.Run("test writer", func(t *testing.T) { testWriter(ctx, t, clientPool, &ownerID, cnrID) })
+		t.Run("test reader", func(t *testing.T) { testReader(ctx, t, clientPool, &ownerID, cnrID, signer) })
+		t.Run("test writer", func(t *testing.T) { testWriter(ctx, t, clientPool, &ownerID, cnrID, signer) })
 
 		err = aioContainer.Terminate(ctx)
 		require.NoError(t, err)
@@ -54,9 +57,9 @@ func TestSftpHandlers(t *testing.T) {
 	}
 }
 
-func testReader(ctx context.Context, t *testing.T, clientPool *pool.Pool, ownerID *user.ID, cnrID cid.ID) {
+func testReader(ctx context.Context, t *testing.T, clientPool *pool.Pool, ownerID *user.ID, cnrID cid.ID, signer user.Signer) {
 	content := "content for read test"
-	id := putObject(ctx, t, clientPool, ownerID, cnrID, content, nil)
+	id := putObject(ctx, t, clientPool, ownerID, cnrID, content, nil, signer)
 
 	obj := &ObjectInfo{
 		Container: &ContainerInfo{
@@ -66,7 +69,7 @@ func testReader(ctx context.Context, t *testing.T, clientPool *pool.Pool, ownerI
 		PayloadSize: int64(len(content)),
 	}
 
-	reader := newReader(ctx, obj, clientPool)
+	reader := newReader(ctx, obj, clientPool, signer)
 
 	_, err := reader.ReadAt(nil, -1)
 	require.Error(t, err)
@@ -88,7 +91,7 @@ func testReader(ctx context.Context, t *testing.T, clientPool *pool.Pool, ownerI
 	require.Equal(t, content, buff.String())
 }
 
-func testWriter(ctx context.Context, t *testing.T, clientPool *pool.Pool, ownerID *user.ID, cnrID cid.ID) {
+func testWriter(ctx context.Context, t *testing.T, clientPool *pool.Pool, ownerID *user.ID, cnrID cid.ID, signer user.Signer) {
 	content := "content for write test"
 
 	obj := &ObjectInfo{
@@ -98,9 +101,12 @@ func testWriter(ctx context.Context, t *testing.T, clientPool *pool.Pool, ownerI
 		FileName: "write-test-object",
 	}
 
-	writer := newWriter(ctx, obj, clientPool, ownerID)
+	ni, err := clientPool.NetworkInfo(ctx, client.PrmNetworkInfo{})
+	require.NoError(t, err)
 
-	_, err := writer.WriteAt(nil, -1)
+	writer := newWriter(ctx, obj, clientPool, ownerID, signer, ni.MaxObjectSize())
+
+	_, err = writer.WriteAt(nil, -1)
 	require.Error(t, err)
 
 	b := []byte(content[:len(content)/2])
@@ -114,7 +120,7 @@ func testWriter(ctx context.Context, t *testing.T, clientPool *pool.Pool, ownerI
 	err = writer.Close()
 	require.NoError(t, err)
 
-	payload, err := getObjectByName(ctx, clientPool, cnrID, obj.Name())
+	payload, err := getObjectByName(ctx, clientPool, cnrID, obj.Name(), signer)
 	require.NoError(t, err)
 
 	require.Equal(t, content, string(payload))
@@ -137,9 +143,9 @@ func createDockerContainer(ctx context.Context, t *testing.T, image string) test
 	return aioC
 }
 
-func getPool(ctx context.Context, t *testing.T, key *keys.PrivateKey) *pool.Pool {
+func getPool(ctx context.Context, t *testing.T, signer user.Signer) *pool.Pool {
 	var prm pool.InitParameters
-	prm.SetKey(&key.PrivateKey)
+	prm.SetSigner(signer)
 	prm.SetNodeDialTimeout(5 * time.Second)
 	prm.SetHealthcheckTimeout(5 * time.Second)
 	prm.AddNode(pool.NewNodeParam(1, "localhost:8080", 1))
@@ -152,7 +158,7 @@ func getPool(ctx context.Context, t *testing.T, key *keys.PrivateKey) *pool.Pool
 	return clientPool
 }
 
-func createContainer(ctx context.Context, t *testing.T, clientPool *pool.Pool, ownerID user.ID) cid.ID {
+func createContainer(ctx context.Context, t *testing.T, clientPool *pool.Pool, ownerID user.ID, signer user.Signer) cid.ID {
 	var policy netmap.PlacementPolicy
 	err := policy.DecodeString("REP 1")
 	require.NoError(t, err)
@@ -163,24 +169,21 @@ func createContainer(ctx context.Context, t *testing.T, clientPool *pool.Pool, o
 	cnr.SetBasicACL(0x0FFFFFFF)
 	cnr.SetOwner(ownerID)
 
-	container.SetName(&cnr, "friendlyName")
-	container.SetCreationTime(&cnr, time.Now())
+	cnr.SetName("friendlyName")
+	cnr.SetCreationTime(time.Now())
 
-	var wp pool.WaitParams
-	wp.SetPollInterval(3 * time.Second)
-	wp.SetTimeout(15 * time.Second)
+	var prm client.PrmContainerPut
 
-	var prm pool.PrmContainerPut
-	prm.SetContainer(cnr)
+	w := waiter.NewContainerPutWaiter(clientPool, 1*time.Second)
 
-	cnrID, err := clientPool.PutContainer(ctx, prm)
+	cnrID, err := w.ContainerPut(ctx, cnr, signer, prm)
 	require.NoError(t, err)
 	fmt.Println(cnrID.String())
 
 	return cnrID
 }
 
-func putObject(ctx context.Context, t *testing.T, clientPool *pool.Pool, ownerID *user.ID, cnrID cid.ID, content string, attributes map[string]string) oid.ID {
+func putObject(ctx context.Context, t *testing.T, clientPool *pool.Pool, ownerID *user.ID, cnrID cid.ID, content string, attributes map[string]string, signer user.Signer) oid.ID {
 	obj := object.New()
 	obj.SetContainerID(cnrID)
 	obj.SetOwnerID(ownerID)
@@ -193,27 +196,35 @@ func putObject(ctx context.Context, t *testing.T, clientPool *pool.Pool, ownerID
 		attrs = append(attrs, *attr)
 	}
 	obj.SetAttributes(attrs...)
-	obj.SetPayload([]byte(content))
 
-	var prm pool.PrmObjectPut
-	prm.SetHeader(*obj)
+	var prm client.PrmObjectPutInit
 
-	id, err := clientPool.PutObject(ctx, prm)
+	ni, err := clientPool.NetworkInfo(ctx, client.PrmNetworkInfo{})
 	require.NoError(t, err)
 
-	return id
+	chunk := make([]byte, ni.MaxObjectSize())
+
+	writer, err := clientPool.ObjectPutInit(ctx, *obj, signer, prm)
+	require.NoError(t, err)
+
+	_, err = io.CopyBuffer(writer, bytes.NewBuffer([]byte(content)), chunk)
+	require.NoError(t, err)
+
+	err = writer.Close()
+	require.NoError(t, err)
+
+	return writer.GetResult().StoredObjectID()
 }
 
-func getObjectByName(ctx context.Context, clientPool *pool.Pool, cnrID cid.ID, name string) ([]byte, error) {
+func getObjectByName(ctx context.Context, clientPool *pool.Pool, cnrID cid.ID, name string, signer user.Signer) ([]byte, error) {
 	filter := object.NewSearchFilters()
 	filter.AddRootFilter()
 	filter.AddFilter(object.AttributeFileName, name, object.MatchStringEqual)
 
-	var prm pool.PrmObjectSearch
-	prm.SetContainerID(cnrID)
+	var prm client.PrmObjectSearch
 	prm.SetFilters(filter)
 
-	res, err := clientPool.SearchObjects(ctx, prm)
+	res, err := clientPool.ObjectSearchInit(ctx, cnrID, signer, prm)
 	if err != nil {
 		return nil, fmt.Errorf("init searching using client: %w", err)
 	}
@@ -233,13 +244,21 @@ func getObjectByName(ctx context.Context, clientPool *pool.Pool, cnrID cid.ID, n
 		return nil, errors.New("found not exactly one object")
 	}
 
-	var prmGet pool.PrmObjectGet
-	prmGet.SetAddress(newAddress(cnrID, ids[0]))
+	var prmGet client.PrmObjectGet
 
-	resObj, err := clientPool.GetObject(ctx, prmGet)
+	_, resObj, err := clientPool.ObjectGetInit(ctx, cnrID, ids[0], signer, prmGet)
 	if err != nil {
 		return nil, err
 	}
 
-	return io.ReadAll(resObj.Payload)
+	payload, err := io.ReadAll(resObj)
+	if err != nil {
+		return nil, err
+	}
+
+	if err = resObj.Close(); err != nil {
+		return nil, err
+	}
+
+	return payload, nil
 }
