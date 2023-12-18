@@ -189,7 +189,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault(cfgRebalanceTimer, defaultRebalanceTimer)
 }
 
-func newLogger(v *viper.Viper, sftpConfig *handlers.SftpServerConfig) *zap.Logger {
+func newLogger(_ *viper.Viper, sftpConfig *handlers.SftpServerConfig) *zap.Logger {
 	config := zap.NewProductionConfig()
 
 	debugStream := "/dev/null"

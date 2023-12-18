@@ -49,7 +49,7 @@ func (t *ContainerInfo) IsDir() bool {
 	return true
 }
 
-func (t *ContainerInfo) Sys() interface{} {
+func (t *ContainerInfo) Sys() any {
 	return nil
 }
 
@@ -73,6 +73,6 @@ func (t *ObjectInfo) IsDir() bool {
 	return false
 }
 
-func (t *ObjectInfo) Sys() interface{} {
+func (t *ObjectInfo) Sys() any {
 	return nil
 }
