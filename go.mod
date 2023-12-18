@@ -1,6 +1,6 @@
 module github.com/nspcc-dev/neofs-sftp-gw
 
-go 1.17
+go 1.19
 
 require (
 	github.com/nspcc-dev/neo-go v0.99.2
