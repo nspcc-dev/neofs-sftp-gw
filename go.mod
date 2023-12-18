@@ -5,7 +5,7 @@ go 1.19
 require (
 	github.com/nspcc-dev/neo-go v0.104.0
 	github.com/nspcc-dev/neofs-sdk-go v1.0.0-rc.11
-	github.com/pkg/sftp v1.13.3
+	github.com/pkg/sftp v1.13.6
 	github.com/spf13/pflag v1.0.5
 	github.com/spf13/viper v1.3.2
 	github.com/stretchr/testify v1.8.4
