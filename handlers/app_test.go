@@ -22,15 +22,15 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
+var (
+	versions = []string{
+		"nspccdev/neofs-aio:0.38.1",
+		"nspccdev/neofs-aio:0.39.0",
+	}
+)
+
 func TestSftpHandlers(t *testing.T) {
 	rootCtx := context.Background()
-	aioImage := "nspccdev/neofs-aio-testcontainer:"
-	versions := []string{
-		"0.27.7",
-		"0.28.1",
-		"0.29.0",
-		"latest",
-	}
 	key, err := keys.NewPrivateKeyFromHex("1dd37fba80fec4e6a6f13fd708d8dcb3b29def768017052f6c930fa1c5d90bbb")
 	require.NoError(t, err)
 
@@ -40,7 +40,7 @@ func TestSftpHandlers(t *testing.T) {
 	for _, version := range versions {
 		ctx, cancel := context.WithCancel(rootCtx)
 
-		aioContainer := createDockerContainer(ctx, t, aioImage+version)
+		aioContainer := createDockerContainer(ctx, t, version)
 
 		clientPool := getPool(ctx, t, key)
 		cnrID := createContainer(ctx, t, clientPool, ownerID)
@@ -123,7 +123,7 @@ func testWriter(ctx context.Context, t *testing.T, clientPool *pool.Pool, ownerI
 func createDockerContainer(ctx context.Context, t *testing.T, image string) testcontainers.Container {
 	req := testcontainers.ContainerRequest{
 		Image:       image,
-		WaitingFor:  wait.NewLogStrategy("aio container started").WithStartupTimeout(30 * time.Second),
+		WaitingFor:  wait.NewLogStrategy("aio container started").WithStartupTimeout(90 * time.Second),
 		Name:        "sftp-gw-aio",
 		Hostname:    "sftp-gw-aio",
 		NetworkMode: "host",
