@@ -43,9 +43,9 @@ func TestSftpHandlers(t *testing.T) {
 	for _, version := range versions {
 		ctx, cancel := context.WithCancel(rootCtx)
 
-		aioContainer := createDockerContainer(ctx, t, version)
+		aioContainer, endpoint := createDockerContainer(ctx, t, version)
 
-		clientPool := getPool(ctx, t, signer)
+		clientPool := getPool(ctx, t, signer, endpoint)
 		cnrID := createContainer(ctx, t, clientPool, ownerID, signer)
 
 		t.Run("test reader", func(t *testing.T) { testReader(ctx, t, clientPool, &ownerID, cnrID, signer) })
@@ -126,13 +126,13 @@ func testWriter(ctx context.Context, t *testing.T, clientPool *pool.Pool, ownerI
 	require.Equal(t, content, string(payload))
 }
 
-func createDockerContainer(ctx context.Context, t *testing.T, image string) testcontainers.Container {
+func createDockerContainer(ctx context.Context, t *testing.T, image string) (testcontainers.Container, string) {
 	req := testcontainers.ContainerRequest{
-		Image:       image,
-		WaitingFor:  wait.NewLogStrategy("aio container started").WithStartupTimeout(90 * time.Second),
-		Name:        "sftp-gw-aio",
-		Hostname:    "sftp-gw-aio",
-		NetworkMode: "host",
+		Image:        image,
+		WaitingFor:   wait.NewLogStrategy("aio container started").WithStartupTimeout(90 * time.Second),
+		Name:         "sftp-gw-aio",
+		Hostname:     "sftp-gw-aio",
+		ExposedPorts: []string{"8080/tcp"},
 	}
 	aioC, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: req,
@@ -140,15 +140,19 @@ func createDockerContainer(ctx context.Context, t *testing.T, image string) test
 	})
 	require.NoError(t, err)
 
-	return aioC
+	// for instance: localhost:32781
+	nodeEndpoint, err := aioC.Endpoint(ctx, "")
+	require.NoError(t, err)
+
+	return aioC, nodeEndpoint
 }
 
-func getPool(ctx context.Context, t *testing.T, signer user.Signer) *pool.Pool {
+func getPool(ctx context.Context, t *testing.T, signer user.Signer, endpoint string) *pool.Pool {
 	var prm pool.InitParameters
 	prm.SetSigner(signer)
 	prm.SetNodeDialTimeout(5 * time.Second)
 	prm.SetHealthcheckTimeout(5 * time.Second)
-	prm.AddNode(pool.NewNodeParam(1, "localhost:8080", 1))
+	prm.AddNode(pool.NewNodeParam(1, endpoint, 1))
 
 	clientPool, err := pool.NewPool(prm)
 	require.NoError(t, err)
