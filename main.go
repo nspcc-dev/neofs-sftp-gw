@@ -99,7 +99,7 @@ func newHandler(ctx context.Context, l *zap.Logger, v *viper.Viper, sftpConfig *
 		l.Fatal("failed to get network info", zap.Error(err))
 	}
 
-	return handlers.NewApp(conns, signer, &ownerID, l, sftpConfig, ni.MaxObjectSize())
+	return handlers.NewApp(conns, signer, &ownerID, l, sftpConfig, ni.MaxObjectSize(), v.GetString(cfgNeoFSContainerPolicy))
 }
 
 func server(app *handlers.App) {

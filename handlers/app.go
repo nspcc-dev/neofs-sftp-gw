@@ -11,11 +11,15 @@ import (
 	"time"
 
 	"github.com/nspcc-dev/neofs-sdk-go/client"
+	"github.com/nspcc-dev/neofs-sdk-go/container"
+	"github.com/nspcc-dev/neofs-sdk-go/container/acl"
 	cid "github.com/nspcc-dev/neofs-sdk-go/container/id"
+	"github.com/nspcc-dev/neofs-sdk-go/netmap"
 	"github.com/nspcc-dev/neofs-sdk-go/object"
 	oid "github.com/nspcc-dev/neofs-sdk-go/object/id"
 	"github.com/nspcc-dev/neofs-sdk-go/pool"
 	"github.com/nspcc-dev/neofs-sdk-go/user"
+	"github.com/nspcc-dev/neofs-sdk-go/waiter"
 	"github.com/pkg/sftp"
 	"go.uber.org/zap"
 )
@@ -30,11 +34,12 @@ type (
 	App struct {
 		Log *zap.Logger
 
-		pool          *pool.Pool
-		owner         *user.ID
-		signer        user.Signer
-		sftConfig     *SftpServerConfig
-		maxObjectSize uint64
+		pool                *pool.Pool
+		owner               *user.ID
+		signer              user.Signer
+		sftConfig           *SftpServerConfig
+		maxObjectSize       uint64
+		defaultBucketPolicy string
 	}
 
 	// SftpServerConfig is openssh sftp subsystem params.
@@ -66,14 +71,16 @@ type (
 )
 
 // NewApp creates handlers (implements sftp.FileReader, sftp.FileWriter, sftp.FileCmder, sftp.FileLister).
-func NewApp(conns *pool.Pool, signer user.Signer, owner *user.ID, l *zap.Logger, sftpConfig *SftpServerConfig, maxObjectSize uint64) *App {
+func NewApp(conns *pool.Pool, signer user.Signer, owner *user.ID, l *zap.Logger, sftpConfig *SftpServerConfig,
+	maxObjectSize uint64, defaultBucketPolicy string) *App {
 	return &App{
-		pool:          conns,
-		signer:        signer,
-		owner:         owner,
-		Log:           l,
-		sftConfig:     sftpConfig,
-		maxObjectSize: maxObjectSize,
+		pool:                conns,
+		signer:              signer,
+		owner:               owner,
+		Log:                 l,
+		sftConfig:           sftpConfig,
+		maxObjectSize:       maxObjectSize,
+		defaultBucketPolicy: defaultBucketPolicy,
 	}
 }
 
@@ -393,9 +400,42 @@ func (a *App) Filecmd(r *sftp.Request) error {
 	}
 	switch r.Method {
 	case "Mkdir":
+		// valid Filepath "/somedir" or "somedir".
+		path := strings.TrimPrefix(r.Filepath, delimiter)
+		// invalid "/somedir/subdir", "somedir/subdir"
+		if parts := strings.Split(path, delimiter); len(parts) > 1 {
+			return fmt.Errorf("supported only first level dirs")
+		}
+
+		return a.putContainer(r.Context(), path, *a.owner, a.defaultBucketPolicy)
 	case "Remove", "Rmdir":
 		err := a.deleteNeofsFile(r.Context(), r.Filepath)
 		return err
+	}
+
+	return nil
+}
+
+func (a *App) putContainer(ctx context.Context, name string, owner user.ID, policyStr string) error {
+	var policy netmap.PlacementPolicy
+	if err := policy.DecodeString(policyStr); err != nil {
+		return fmt.Errorf("invalid placement policy: %w", err)
+	}
+
+	var cnr container.Container
+	cnr.Init()
+	cnr.SetPlacementPolicy(policy)
+	cnr.SetBasicACL(acl.Private)
+	cnr.SetOwner(owner)
+
+	cnr.SetName(name)
+	cnr.SetCreationTime(time.Now())
+
+	var prm client.PrmContainerPut
+	w := waiter.NewContainerPutWaiter(a.pool, waiter.DefaultPollInterval)
+
+	if _, err := w.ContainerPut(ctx, cnr, a.signer, prm); err != nil {
+		return fmt.Errorf("container put: %w", err)
 	}
 
 	return nil
