@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -61,7 +60,7 @@ type (
 		pool          *pool.Pool
 		owner         *user.ID
 		signer        user.Signer
-		buffer        *bytes.Buffer
+		buffer        *os.File
 		maxObjectSize uint64
 	}
 )
@@ -87,16 +86,21 @@ func newReader(ctx context.Context, obj *ObjectInfo, conn *pool.Pool, signer use
 	}
 }
 
-func newWriter(ctx context.Context, obj *ObjectInfo, conn *pool.Pool, ownerID *user.ID, signer user.Signer, maxObjectSize uint64) *objWriter {
+func newWriter(ctx context.Context, obj *ObjectInfo, conn *pool.Pool, ownerID *user.ID, signer user.Signer, maxObjectSize uint64) (*objWriter, error) {
+	file, err := os.CreateTemp("", "sftpwriter")
+	if err != nil {
+		return nil, fmt.Errorf("CreateTemp: %w", err)
+	}
+
 	return &objWriter{
 		ctx:           ctx,
 		file:          obj,
 		pool:          conn,
 		owner:         ownerID,
-		buffer:        bytes.NewBuffer(nil),
+		buffer:        file,
 		signer:        signer,
 		maxObjectSize: maxObjectSize,
-	}
+	}, nil
 }
 
 // ListAt lists files.
@@ -415,7 +419,12 @@ func (a *App) Filewrite(r *sftp.Request) (io.WriterAt, error) {
 		Container: cnr,
 	}
 
-	return newWriter(r.Context(), obj, a.pool, a.owner, a.signer, a.maxObjectSize), nil
+	w, err := newWriter(r.Context(), obj, a.pool, a.owner, a.signer, a.maxObjectSize)
+	if err != nil {
+		return nil, fmt.Errorf("newWriter: %w", err)
+	}
+
+	return w, nil
 }
 
 // Fileread prepares io.ReaderAt to download file.
@@ -464,6 +473,12 @@ func newAddress(cnrID cid.ID, objID oid.ID) oid.Address {
 }
 
 func (w *objWriter) Close() error {
+	defer func() {
+		if err := os.Remove(w.buffer.Name()); err != nil {
+			zap.L().Error("remove tmp file", zap.String("file", w.buffer.Name()), zap.Error(err))
+		}
+	}()
+
 	attributes := make([]object.Attribute, 0, 2)
 	filename := object.NewAttribute()
 	filename.SetKey(object.AttributeFileName)
@@ -500,11 +515,7 @@ func (w *objWriter) Close() error {
 }
 
 func (w *objWriter) WriteAt(p []byte, off int64) (n int, err error) {
-	if off != int64(w.buffer.Len()) {
-		// todo consider support it or add regular put object streaming
-		return 0, fmt.Errorf("unsupported")
-	}
-	return w.buffer.Write(p)
+	return w.buffer.WriteAt(p, off)
 }
 
 func (r *objReader) ReadAt(b []byte, off int64) (n int, err error) {
