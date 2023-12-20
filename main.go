@@ -28,6 +28,8 @@ func main() {
 	g, _ := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	app := newHandler(g, l, v, sftpConfig)
 
+	zap.ReplaceGlobals(l)
+
 	if devConf.Enabled {
 		devServer(app, devConf)
 	} else {
