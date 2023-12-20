@@ -104,7 +104,8 @@ func testWriter(ctx context.Context, t *testing.T, clientPool *pool.Pool, ownerI
 	ni, err := clientPool.NetworkInfo(ctx, client.PrmNetworkInfo{})
 	require.NoError(t, err)
 
-	writer := newWriter(ctx, obj, clientPool, ownerID, signer, ni.MaxObjectSize())
+	writer, err := newWriter(ctx, obj, clientPool, ownerID, signer, ni.MaxObjectSize())
+	require.NoError(t, err)
 
 	_, err = writer.WriteAt(nil, -1)
 	require.Error(t, err)

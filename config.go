@@ -61,6 +61,8 @@ const (
 	envPrefix = "SFTP_GW"
 
 	configType = "yaml"
+
+	cfgNeoFSContainerPolicy = "neofs.container.policy"
 )
 
 func fetchPeers(l *zap.Logger, v *viper.Viper) []pool.NodeParam {

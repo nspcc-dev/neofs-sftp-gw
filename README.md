@@ -65,6 +65,10 @@ dev:
   sshkey: "~/.ssh/id_ed25519"
   passphrase: "password"
   address: "0.0.0.0:2022"
+ 
+neofs:
+  container:
+    policy: "REP 3"
 ```
 
 Sample user config (`/home/${USER}/config.yml`):
@@ -81,3 +85,17 @@ peers:
     address: s01.neofs.devenv:8080
     weight: 1
 ```
+
+## Important notes
+
+- During file uploading, the `neofs-sftp-gw` uses OS TmpDir to store the full file before it is uploaded to NeoFS.
+- Uploading a file to the NeoFS requires some time, which is why you should wait until `neofs-sftp-gw` finalizes all actions.
+- According to the previous point, significantly increasing the inactivity timeout on the client side is highly recommended.
+- Creating dirs (NeoFS containers) is possible, but only the first level. In case of creating dir like "aaa/bbb", the dir `aaa` will be created,
+but `bbb` creation will fail with unsupported error.
+- By default, container has `acl.Private` rules.
+
+## Known issues
+
+- File overwriting doesn't work. In this case, another file with the same name will be created. In the dir listing, such file will be presented only one time, but it is unknown which one. Dir refreshing will show any version of file.
+- File downloading doesn't work.

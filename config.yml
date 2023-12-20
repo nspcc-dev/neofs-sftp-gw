@@ -18,3 +18,8 @@ dev:
   sshkey: "~/.ssh/id_ed25519"
   passphrase: "your_password_for_ssh_key"
   address: "0.0.0.0:2022"
+
+neofs:
+  container:
+    # Default container policy
+    policy: "REP 3"

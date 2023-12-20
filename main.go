@@ -28,6 +28,8 @@ func main() {
 	g, _ := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	app := newHandler(g, l, v, sftpConfig)
 
+	zap.ReplaceGlobals(l)
+
 	if devConf.Enabled {
 		devServer(app, devConf)
 	} else {
@@ -97,7 +99,7 @@ func newHandler(ctx context.Context, l *zap.Logger, v *viper.Viper, sftpConfig *
 		l.Fatal("failed to get network info", zap.Error(err))
 	}
 
-	return handlers.NewApp(conns, signer, &ownerID, l, sftpConfig, ni.MaxObjectSize())
+	return handlers.NewApp(conns, signer, &ownerID, l, sftpConfig, ni.MaxObjectSize(), v.GetString(cfgNeoFSContainerPolicy))
 }
 
 func server(app *handlers.App) {
