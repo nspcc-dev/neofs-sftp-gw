@@ -1,7 +1,7 @@
 # NeoFS SFTP Gateway
 NeoFS SFTP Gateway bridges NeoFS internal protocol and SFTP server.
 
-## Arhival notice
+## Archival notice
 
 There are no plans currently to continue development of this gateway. But if
 you're interested in supporting/evolving it, reach out to NeoSPCC via
